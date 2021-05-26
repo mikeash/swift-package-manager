@@ -12,7 +12,7 @@ import TSCBasic
 import TSCUtility
 
 /// Available runtime sanitizers.
-public enum Sanitizer: String, Encodable {
+public enum Sanitizer: String, Encodable, CaseIterable {
     case address
     case thread
     case undefined
@@ -68,13 +68,4 @@ public struct EnabledSanitizers: Encodable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(sanitizers.sorted{ $0.rawValue < $1.rawValue }, forKey: .sanitizers)
     }
-}
-
-extension Sanitizer: StringEnumArgument {
-    public static let completion: ShellCompletion = .values([
-        (address.rawValue, "enable Address sanitizer"),
-        (thread.rawValue, "enable Thread sanitizer"),
-        (undefined.rawValue, "enable Undefined Behavior sanitizer"),
-        (scudo.rawValue, "enable Scudo hardened allocator")
-    ])
 }

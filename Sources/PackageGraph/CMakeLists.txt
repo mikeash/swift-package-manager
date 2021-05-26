@@ -7,18 +7,35 @@
 # See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 
 add_library(PackageGraph
+  BoundVersion.swift
   CheckoutState.swift
+  DependencyMirrors.swift
+  DependencyResolutionNode.swift
   DependencyResolver.swift
+  Diagnostics.swift
+  GraphLoadingNode.swift
+  LocalPackageContainer.swift
+  PackageContainer.swift
   PackageGraph.swift
-  PackageGraphLoader.swift
+  PackageGraph+Loading.swift
   PackageGraphRoot.swift
+  PackageModel+Extensions.swift
+  PackageRequirement.swift
   PinsStore.swift
-  Pubgrub.swift
-  RawPackageConstraints.swift
-  RepositoryPackageContainerProvider.swift
+  Pubgrub/Assignment.swift
+  Pubgrub/Incompatibility.swift
+  Pubgrub/PartialSolution.swift
+  Pubgrub/PubgrubDependencyResolver.swift
+  Pubgrub/Term.swift
+  RepositoryPackageContainer.swift
+  ResolvedPackage.swift
+  ResolvedProduct.swift
+  ResolvedTarget.swift
+  Version+Extensions.swift
   VersionSetSpecifier.swift)
 target_link_libraries(PackageGraph PUBLIC
   TSCBasic
+  Basics
   PackageLoading
   PackageModel
   SourceControl
@@ -27,9 +44,10 @@ target_link_libraries(PackageGraph PUBLIC
 set_target_properties(PackageGraph PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_Swift_MODULE_DIRECTORY})
 
-if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+if(USE_CMAKE_INSTALL)
 install(TARGETS PackageGraph
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
 endif()
+set_property(GLOBAL APPEND PROPERTY SwiftPM_EXPORTS PackageGraph)

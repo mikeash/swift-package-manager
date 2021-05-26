@@ -42,7 +42,10 @@ import TSCUtility
 /// 5. A loaded package, as in #4, for which the targets have also been
 /// loaded. There is not currently a data structure for this, but it is the
 /// result after `PackageLoading.transmute()`.
-public final class Package: Codable {
+public final class Package: ObjectIdentifierProtocol, Encodable {
+    /// The identity of the package.
+    public let identity: PackageIdentity
+
     /// The manifest describing the package.
     public let manifest: Manifest
 
@@ -50,7 +53,14 @@ public final class Package: Codable {
     public let path: AbsolutePath
 
     /// The name of the package.
+    @available(*, deprecated, message: "use identity (or manifestName, but only if you must) instead")
     public var name: String {
+        return self.manifestName
+    }
+
+    /// The name of the package as entered in the manifest.
+    /// This should rarely be used beyond presentation purposes
+    public var manifestName: String {
         return manifest.name
     }
 
@@ -72,6 +82,7 @@ public final class Package: Codable {
     public let testTargetSearchPath: AbsolutePath
 
     public init(
+        identity: PackageIdentity,
         manifest: Manifest,
         path: AbsolutePath,
         targets: [Target],
@@ -79,6 +90,7 @@ public final class Package: Codable {
         targetSearchPath: AbsolutePath,
         testTargetSearchPath: AbsolutePath
     ) {
+        self.identity = identity
         self.manifest = manifest
         self.path = path
         self._targets = .init(wrappedValue: targets)
@@ -88,143 +100,31 @@ public final class Package: Codable {
     }
 
     public enum Error: Swift.Error, Equatable {
-        case noManifest(baseURL: String, version: String?)
+        case noManifest(at: AbsolutePath, version: String?)
     }
 }
-extension Package.Error: CustomStringConvertible {
-   public var description: String {
-        switch self {
-        case .noManifest(let baseURL, let version):
-            var string = "\(baseURL) has no Package.swift manifest"
-            if let version = version {
-                string += " for version \(version)"
-            }
-            return string
-        }
+
+extension Package {
+    public var diagnosticLocation: DiagnosticLocation {
+        return PackageLocation.Local(name: self.manifest.name, packagePath: self.path)
     }
 }
 
 extension Package: CustomStringConvertible {
     public var description: String {
-        return name
+        return self.identity.description
     }
 }
 
-extension Package: ObjectIdentifierProtocol {
-}
-
-/// A package reference.
-///
-/// This represents a reference to a package containing its identity and location.
-public struct PackageReference: JSONMappable, JSONSerializable, Codable, CustomStringConvertible, Equatable, Hashable {
-    public typealias PackageIdentity = String
-
-    /// The kind of package reference.
-    public enum Kind: String, Codable {
-        /// A root package.
-        case root
-
-        /// A non-root local package.
-        case local
-
-        /// A remote package.
-        case remote
-    }
-
-    /// Compute identity of a package given its URL.
-    public static func computeIdentity(packageURL: String) -> String {
-        return computeDefaultName(fromURL: packageURL).lowercased()
-    }
-
-    /// Compute the default name of a package given its URL.
-    public static func computeDefaultName(fromURL url: String) -> String {
-      #if os(Windows)
-        let isSeparator : (Character) -> Bool = { $0 == "/" || $0 == "\\" }
-      #else
-        let isSeparator : (Character) -> Bool = { $0 == "/" }
-      #endif
-       
-        // Get the last path component of the URL.
-        // Drop the last character in case it's a trailing slash.
-        var endIndex = url.endIndex
-        if let lastCharacter = url.last, isSeparator(lastCharacter) {
-            endIndex = url.index(before: endIndex)
+extension Package.Error: CustomStringConvertible {
+   public var description: String {
+        switch self {
+        case .noManifest(let path, let version):
+            var string = "\(path) has no Package.swift manifest"
+            if let version = version {
+                string += " for version \(version)"
+            }
+            return string
         }
-
-        let separatorIndex = url[..<endIndex].lastIndex(where: isSeparator)
-        let startIndex = separatorIndex.map { url.index(after: $0) } ?? url.startIndex
-        var lastComponent = url[startIndex..<endIndex]
-
-        // Strip `.git` suffix if present.
-        if lastComponent.hasSuffix(".git") {
-            lastComponent = lastComponent.dropLast(4)
-        }
-
-        return String(lastComponent)
-    }
-
-    /// The identity of the package.
-    public let identity: PackageIdentity
-
-    /// The name of the package, if available.
-    public var name: String {
-        _name ?? Self.computeDefaultName(fromURL: path)
-    }
-    private let _name: String?
-
-    /// The path of the package.
-    ///
-    /// This could be a remote repository, local repository or local package.
-    public let path: String
-
-    /// The kind of package: root, local, or remote.
-    public let kind: Kind
-
-    /// Create a package reference given its identity and repository.
-    public init(identity: String, path: String, name: String? = nil, kind: Kind = .remote) {
-        assert(identity == identity.lowercased(), "The identity is expected to be lowercased")
-        self._name = name
-        self.identity = identity
-        self.path = path
-        self.kind = kind
-    }
-
-    public static func ==(lhs: PackageReference, rhs: PackageReference) -> Bool {
-        return lhs.identity == rhs.identity
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(identity)
-    }
-
-    public init(json: JSON) throws {
-        self._name = json.get("name")
-        self.identity = try json.get("identity")
-        self.path = try json.get("path")
-
-        // Support previous version of PackageReference that contained an `isLocal` property.
-        if let isLocal: Bool = json.get("isLocal") {
-            kind = isLocal ? .local : .remote
-        } else {
-            kind = try Kind(rawValue: json.get("kind"))!
-        }
-    }
-
-    public func toJSON() -> JSON {
-        return .init([
-            "name": name.toJSON(),
-            "identity": identity,
-            "path": path,
-            "kind": kind.rawValue,
-        ])
-    }
-
-    /// Create a new package reference object with the given name.
-    public func with(newName: String) -> PackageReference {
-        return PackageReference(identity: identity, path: path, name: newName, kind: kind)
-    }
-
-    public var description: String {
-        return identity + (path.isEmpty ? "" : "[\(path)]")
     }
 }

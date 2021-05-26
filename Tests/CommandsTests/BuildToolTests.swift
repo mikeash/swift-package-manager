@@ -1,7 +1,7 @@
 /*
  This source file is part of the Swift.org open source project
 
- Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+ Copyright (c) 2014 - 2021 Apple Inc. and the Swift project authors
  Licensed under Apache License v2.0 with Runtime Library Exception
 
  See http://swift.org/LICENSE.txt for license information
@@ -12,6 +12,7 @@ import XCTest
 
 import SPMTestSupport
 import TSCBasic
+import SPMBuildCore
 import Commands
 import Workspace
 
@@ -40,15 +41,34 @@ final class BuildToolTests: XCTestCase {
     }
     
     func testUsage() throws {
-        XCTAssert(try execute(["-help"]).stdout.contains("USAGE: swift build"))
+        let stdout = try execute(["-help"]).stdout
+        XCTAssert(stdout.contains("USAGE: swift build"), "got stdout:\n" + stdout)
     }
 
     func testSeeAlso() throws {
-        XCTAssert(try execute(["--help"]).stdout.contains("SEE ALSO: swift run, swift package, swift test"))
+        let stdout = try execute(["--help"]).stdout
+        XCTAssert(stdout.contains("SEE ALSO: swift run, swift package, swift test"), "got stdout:\n" + stdout)
     }
 
     func testVersion() throws {
-        XCTAssert(try execute(["--version"]).stdout.contains("Swift Package Manager"))
+        let stdout = try execute(["--version"]).stdout
+        XCTAssert(stdout.contains("Swift Package Manager"), "got stdout:\n" + stdout)
+    }
+
+    func testCreatingSanitizers() throws {
+        for sanitizer in Sanitizer.allCases {
+            XCTAssertEqual(sanitizer, try Sanitizer(argument: sanitizer.shortName))
+        }
+    }
+
+    func testInvalidSanitizer() throws {
+        do {
+            _ = try Sanitizer(argument: "invalid")
+            XCTFail("Should have failed to create Sanitizer")
+        } catch let error as StringError {
+            XCTAssertEqual(
+                error.description, "valid sanitizers: address, thread, undefined, scudo")
+        }
     }
 
     func testBinPathAndSymlink() throws {
@@ -151,6 +171,25 @@ final class BuildToolTests: XCTestCase {
             }
         }
     }
+    
+    func testAtMainSupport() {
+        fixture(name: "Miscellaneous/AtMainSupport") { path in
+            let fullPath = resolveSymlinks(path)
+            do {
+                let result = try build(["--product", "ClangExec"], packagePath: fullPath)
+                XCTAssert(result.binContents.contains("ClangExec"))
+            } catch SwiftPMProductError.executionFailure(_, let stdout, let stderr) {
+                XCTFail(stdout + "\n" + stderr)
+            }
+
+            do {
+                let result = try build(["--product", "SwiftExec"], packagePath: fullPath)
+                XCTAssert(result.binContents.contains("SwiftExec"))
+            } catch SwiftPMProductError.executionFailure(_, let stdout, let stderr) {
+                XCTFail(stdout + "\n" + stderr)
+            }
+        }
+    }
 
     func testNonReachableProductsAndTargetsFunctional() {
         fixture(name: "Miscellaneous/UnreachableTargets") { path in
@@ -203,6 +242,22 @@ final class BuildToolTests: XCTestCase {
                 XCTAssert(result.binContents.contains("B.swiftinterface"))
             } catch SwiftPMProductError.executionFailure(_, _, let stderr) {
                 XCTFail(stderr)
+            }
+        }
+    }
+
+    func testBuildCompleteMessage() {
+        fixture(name: "DependencyResolution/Internal/Simple") { path in
+            do {
+                let result = try execute([], packagePath: path)
+                // Number of steps must be greater than 0. e.g., [8/8] Build complete!
+                XCTAssertMatch(result.stdout, .regex("\\[[1-9][0-9]*\\/[1-9][0-9]*\\] Build complete!"))
+            }
+
+            do {
+                let result = try execute([], packagePath: path)
+                // test second time, to make sure message is presented even when nothing to build (cached)
+                XCTAssertTrue(result.stdout.contains("[0/0] Build complete!"), result.stdout)
             }
         }
     }

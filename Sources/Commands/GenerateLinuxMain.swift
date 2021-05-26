@@ -8,14 +8,19 @@ See http://swift.org/LICENSE.txt for license information
 See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 */
 
-import TSCBasic
+import Basics
 import PackageGraph
 import PackageModel
+import TSCBasic
 
 /// A utility for generating test entries on linux.
 ///
 /// This uses input from macOS's test discovery and generates
 /// corelibs-xctest compatible test manifests.
+///
+/// this functionality is deprecated as of 12/2020
+/// We are keeping it here for transition purposes
+/// This class is to be removed in future releases
 final class LinuxMainGenerator {
 
     enum Error: Swift.Error {
@@ -98,7 +103,10 @@ final class LinuxMainGenerator {
         guard let testTarget = graph.reachableProducts.first(where: { $0.type == .test })?.targets.first else {
             throw Error.noTestTargets
         }
-        let linuxMain = testTarget.sources.root.parentDirectory.appending(components: SwiftTarget.linuxMainBasename)
+        guard let linuxMainFileName = SwiftTarget.testManifestNames.first(where: { $0.lowercased().hasPrefix("linux") }) else {
+            throw InternalError("Unknown linux main file name")
+        }
+        let linuxMain = testTarget.sources.root.parentDirectory.appending(components: linuxMainFileName)
 
         let stream = try LocalFileOutputByteStream(linuxMain)
         stream <<< "import XCTest" <<< "\n\n"

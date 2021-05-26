@@ -12,14 +12,16 @@ add_library(SPMLLBuild
 set_target_properties(SPMLLBuild PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_Swift_MODULE_DIRECTORY})
 target_link_libraries(SPMLLBuild PUBLIC
+  Basics
   TSCBasic
   TSCUtility
+  Basics
   llbuildSwift)
 
-
-if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+if(USE_CMAKE_INSTALL)
 install(TARGETS SPMLLBuild
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
 endif()
+set_property(GLOBAL APPEND PROPERTY SwiftPM_EXPORTS SPMLLBuild)

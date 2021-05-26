@@ -8,25 +8,22 @@
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
  */
 
+import Basics
+import PackageModel
+import SourceControl
 import TSCBasic
 import TSCUtility
 
-import PackageModel
-import SourceControl
-
 /// Represents the input to the package graph root.
 public struct PackageGraphRootInput {
-
-    public typealias PackageDependency = PackageGraphRoot.PackageDependency
-
     /// The list of root packages.
     public let packages: [AbsolutePath]
 
     /// Top level dependencies to the graph.
-    public let dependencies: [PackageDependency]
+    public let dependencies: [PackageDependencyDescription]
 
     /// Create a package graph root.
-    public init(packages: [AbsolutePath], dependencies: [PackageDependency] = []) {
+    public init(packages: [AbsolutePath], dependencies: [PackageDependencyDescription] = []) {
         self.packages = packages
         self.dependencies = dependencies
     }
@@ -35,75 +32,35 @@ public struct PackageGraphRootInput {
 /// Represents the inputs to the package graph.
 public struct PackageGraphRoot {
 
-    // FIXME: We can kill this now.
-    //
-    /// Represents a top level package dependencies.
-    public struct PackageDependency {
+    /// The root packages.
+    public let packages: [PackageIdentity: (reference: PackageReference, manifest: Manifest)]
 
-        public typealias Requirement = PackageModel.PackageDependencyDescription.Requirement
-
-        // Location of this dependency.
-        //
-        // Opaque location object which will be included in any diagnostics
-        // related to this dependency.  Clients can use this identify where this
-        // dependency is declared.
-        public let location: String
-
-        /// The URL of the package.
-        public let url: String
-
-        /// The requirement of the package.
-        public let requirement: Requirement
-
-        /// The product filter to apply to the package.
-        public let productFilter: ProductFilter
-
-        /// Create the package reference object for the dependency.
-        public func createPackageRef(config: SwiftPMConfig) -> PackageReference {
-            let effectiveURL = config.mirroredURL(forURL: self.url)
-            return PackageReference(
-                identity: PackageReference.computeIdentity(packageURL: effectiveURL),
-                path: effectiveURL,
-                kind: requirement == .localPackage ? .local : .remote
-            )
-        }
-
-        public init(
-            url: String,
-            requirement: Requirement,
-            productFilter: ProductFilter,
-            location: String
-        ) {
-            // FIXME: SwiftPM can't handle file URLs with file:// scheme so we need to
-            // strip that. We need to design a URL data structure for SwiftPM.
-            let filePrefix = "file://"
-            if url.hasPrefix(filePrefix) {
-                self.url = AbsolutePath(String(url.dropFirst(filePrefix.count))).pathString
-            } else {
-                self.url = url
-            }
-            self.requirement = requirement
-            self.productFilter = productFilter
-            self.location = location
-        }
+    /// The root manifests.
+    public var manifests: [PackageIdentity: Manifest] {
+        return self.packages.compactMapValues { $0.manifest }
     }
 
-    /// The list of root manifests.
-    public let manifests: [Manifest]
-
     /// The root package references.
-     public let packageRefs: [PackageReference]
+    public var packageReferences: [PackageReference] {
+        return self.packages.values.map { $0.reference }
+    }
 
     /// The top level dependencies.
-    public let dependencies: [PackageDependency]
+    public let dependencies: [PackageDependencyDescription]
 
     /// Create a package graph root.
-    public init(input: PackageGraphRootInput, manifests: [Manifest], explicitProduct: String? = nil) {
-        self.packageRefs = zip(input.packages, manifests).map { (path, manifest) in
-            let identity = PackageReference.computeIdentity(packageURL: manifest.url)
-            return PackageReference(identity: identity, path: path.pathString, kind: .root)
-        }
-        self.manifests = manifests
+    /// Note this quietly skip inputs for which manifests are not found. this could be because the manifest  failed to load or for some other reasons
+    // FIXME: This API behavior wrt to non-found manifests is fragile, but required by IDEs
+    // it may lead to incorrect assumption in downstream code which may expect an error if a manifest was not found
+    // we should refactor this API to more clearly return errors for inputs that do not have a corresponding manifest
+    public init(input: PackageGraphRootInput, manifests: [AbsolutePath: Manifest], explicitProduct: String? = nil) {
+        self.packages = input.packages.reduce(into: .init(), { partial, inputPath in
+            if let manifest = manifests[inputPath]  {
+                let packagePath = manifest.path.parentDirectory
+                let identity = PackageIdentity(path: packagePath) // this does not use the identity resolver which is fine since these are the root packages
+                partial[identity] = (.root(identity: identity, path: packagePath), manifest)
+            }
+        })
 
         // FIXME: Deprecate special casing once the manifest supports declaring used executable products.
         // Special casing explicit products like this is necessary to pass the test suite and satisfy backwards compatibility.
@@ -114,13 +71,8 @@ public struct PackageGraphRoot {
         // at which time the current special casing can be deprecated.
         var adjustedDependencies = input.dependencies
         if let product = explicitProduct {
-            for dependency in manifests.lazy
-                .map({ $0.dependenciesRequired(for: .everything) }).joined() {
-                    adjustedDependencies.append(PackageDependency(
-                        url: dependency.declaration.url,
-                        requirement: dependency.declaration.requirement,
-                        productFilter: .specific([product]),
-                        location: ""))
+            for dependency in manifests.values.lazy.map({ $0.dependenciesRequired(for: .everything) }).joined() {
+                adjustedDependencies.append(dependency.filtered(by: .specific([product])))
             }
         }
 
@@ -128,43 +80,52 @@ public struct PackageGraphRoot {
     }
 
     /// Returns the constraints imposed by root manifests + dependencies.
-    public func constraints(config: SwiftPMConfig) -> [RepositoryPackageConstraint] {
-        let constraints = packageRefs.map({
-            RepositoryPackageConstraint(container: $0, requirement: .unversioned, products: .everything)
-        })
-        return constraints + dependencies.map({
-            RepositoryPackageConstraint(
-                container: $0.createPackageRef(config: config),
-                requirement: $0.requirement.toConstraintRequirement(),
+    public func constraints() throws -> [PackageContainerConstraint] {
+        let constraints = self.packageReferences.map {
+            PackageContainerConstraint(package: $0, requirement: .unversioned, products: .everything)
+        }
+        
+        let depend = try dependencies.map{
+            PackageContainerConstraint(
+                package: $0.createPackageRef(),
+                requirement: try $0.toConstraintRequirement(),
                 products: $0.productFilter
             )
-        })
+        }
+        return constraints + depend
+    }
+}
+
+extension PackageDependencyDescription {
+    /// Returns the constraint requirement representation.
+    public func toConstraintRequirement() throws -> PackageRequirement {
+        switch self {
+        case .local:
+            return .unversioned
+        case .scm(let data):
+            return try data.requirement.toConstraintRequirement()
+        }
     }
 }
 
 extension PackageDependencyDescription.Requirement {
-
     /// Returns the constraint requirement representation.
-    public func toConstraintRequirement() -> PackageRequirement {
+    public func toConstraintRequirement() throws -> PackageRequirement {
         switch self {
         case .range(let range):
             return .versionSet(.range(range))
-
         case .revision(let identifier):
-            assert(Git.checkRefFormat(ref: identifier))
-
+            guard Git.checkRefFormat(ref: identifier) else {
+                throw StringError("Could not find revision: '\(identifier)'")
+            }
             return .revision(identifier)
-
         case .branch(let identifier):
-            assert(Git.checkRefFormat(ref: identifier))
-
+            guard Git.checkRefFormat(ref: identifier) else {
+                throw StringError("Could not find branch: '\(identifier)'")
+            }
             return .revision(identifier)
-
         case .exact(let version):
             return .versionSet(.exact(version))
-
-        case .localPackage:
-            return .unversioned
         }
     }
 }

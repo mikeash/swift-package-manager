@@ -10,6 +10,8 @@ See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 
 import class Foundation.ProcessInfo
 
+import ArgumentParser
+import Basics
 import TSCBasic
 import SPMBuildCore
 import Build
@@ -38,14 +40,9 @@ extension TestError: CustomStringConvertible {
     }
 }
 
-public class TestToolOptions: ToolOptions {
+struct TestToolOptions: ParsableArguments {
     /// Returns the mode in with the tool command should run.
     var mode: TestMode {
-        // If we got version option, just print the version and exit.
-        if shouldPrintVersion {
-            return .version
-        }
-
         if shouldRunInParallel {
             return .runParallel
         }
@@ -64,40 +61,84 @@ public class TestToolOptions: ToolOptions {
 
         return .runSerial
     }
-
+    
+    @Flag(name: .customLong("skip-build"),
+          help: "Skip building the test target")
+    var shouldSkipBuilding: Bool = false
+    
     /// If the test target should be built before testing.
-    var shouldBuildTests = true
+    var shouldBuildTests: Bool {
+        !shouldSkipBuilding
+    }
 
     /// If tests should run in parallel mode.
-    var shouldRunInParallel = false
+    @Flag(name: .customLong("parallel"),
+          help: "Run the tests in parallel.")
+    var shouldRunInParallel: Bool = false
 
     /// Number of tests to execute in parallel
+    @Option(name: .customLong("num-workers"),
+            help: "Number of tests to execute in parallel.")
     var numberOfWorkers: Int?
 
     /// List the tests and exit.
-    var shouldListTests = false
+    @Flag(name: [.customLong("list-tests"), .customShort("l")],
+          help: "Lists test methods in specifier format")
+    var shouldListTests: Bool = false
 
     /// Generate LinuxMain entries and exit.
-    var shouldGenerateLinuxMain = false
+    @Flag(name: .customLong("generate-linuxmain"), help: .hidden)
+    var shouldGenerateLinuxMain: Bool = false
 
     /// If the path of the exported code coverage JSON should be printed.
-    var shouldPrintCodeCovPath = false
+    @Flag(name: .customLong("show-codecov-path"),
+          help: "Print the path of the exported code coverage JSON file")
+    var shouldPrintCodeCovPath: Bool = false
 
     var testCaseSpecifier: TestCaseSpecifier {
-        testCaseSpecifierOverride() ?? _testCaseSpecifier
+        if !filter.isEmpty {
+            return .regex(filter)
+        }
+        
+        return _testCaseSpecifier.map { .specific($0) } ?? .none
     }
 
-    var _testCaseSpecifier: TestCaseSpecifier = .none
+    @Option(name: [.customShort("s"), .customLong("specifier")])
+    var _testCaseSpecifier: String?
+
+    @Option(help: """
+        Run test cases matching regular expression, Format: <test-target>.<test-case> \
+        or <test-target>.<test-case>/<test>
+        """)
+    var filter: [String] = []
+
+    var testCaseSkip: TestCaseSpecifier {
+        // TODO: Remove this once the environment variable is no longer used.
+        if let override = testCaseSkipOverride() {
+            return override
+        }
+      
+        return _testCaseSkip.isEmpty
+            ? .none
+            : .skip(_testCaseSkip)
+    }
+
+    @Option(name: .customLong("skip"),
+            help: "Skip test cases matching regular expression, Example: --skip PerformanceTests")
+    var _testCaseSkip: [String] = []
 
     /// Path where the xUnit xml file should be generated.
+    @Option(name: .customLong("xunit-output"),
+            help: "Path where the xUnit xml file should be generated.")
     var xUnitOutput: AbsolutePath?
 
     /// The test product to use. This is useful when there are multiple test products
     /// to choose from (usually in multiroot packages).
-    public var testProduct: String?
+    @Option(help: "Test the specified product.")
+    var testProduct: String?
 
     /// Returns the test case specifier if overridden in the env.
-    private func testCaseSpecifierOverride() -> TestCaseSpecifier? {
+    private func testCaseSkipOverride() -> TestCaseSpecifier? {
         guard let override = ProcessEnv.vars["_SWIFTPM_SKIP_TESTS_LIST"] else {
             return nil
         }
@@ -126,7 +167,8 @@ public class TestToolOptions: ToolOptions {
 /// This is used to filter tests to run
 ///   .none     => No filtering
 ///   .specific => Specify test with fully quantified name
-///   .regex    => RegEx patterns
+///   .regex    => RegEx patterns for tests to run
+///   .skip     => RegEx patterns for tests to skip
 public enum TestCaseSpecifier {
     case none
     case specific(String)
@@ -135,7 +177,6 @@ public enum TestCaseSpecifier {
 }
 
 public enum TestMode {
-    case version
     case listTests
     case codeCovPath
     case generateLinuxMain
@@ -144,31 +185,36 @@ public enum TestMode {
 }
 
 /// swift-test tool namespace
-public class SwiftTestTool: SwiftTool<TestToolOptions> {
+public struct SwiftTestTool: SwiftCommand {
+    public static var configuration = CommandConfiguration(
+        commandName: "test",
+        _superCommandName: "swift",
+        abstract: "Build and run tests",
+        discussion: "SEE ALSO: swift build, swift run, swift package",
+        version: SwiftVersion.currentVersion.completeDisplayString,
+        helpNames: [.short, .long, .customLong("help", withSingleDash: true)])
 
-   public convenience init(args: [String]) {
-       self.init(
-            toolName: "test",
-            usage: "[options]",
-            overview: "Build and run tests",
-            args: args,
-            seeAlso: type(of: self).otherToolNames()
-        )
+    @OptionGroup(_hiddenFromHelp: true)
+    var swiftOptions: SwiftToolOptions
+
+    @OptionGroup()
+    var options: TestToolOptions
+    
+    var shouldEnableCodeCoverage: Bool {
+        swiftOptions.shouldEnableCodeCoverage
     }
-
-    override func runImpl() throws {
-
+    
+    public func run(_ swiftTool: SwiftTool) throws {
         // Validate commands arguments
-        try validateArguments()
+        try validateArguments(diagnostics: swiftTool.diagnostics)
 
         switch options.mode {
-        case .version:
-            print(Versioning.currentVersion.completeDisplayString)
-
         case .listTests:
-            let testProducts = try buildTestsIfNeeded()
-            let testSuites = try getTestSuites(in: testProducts)
-            let tests = testSuites.filteredTests(specifier: options.testCaseSpecifier)
+            let testProducts = try buildTestsIfNeeded(swiftTool: swiftTool)
+            let testSuites = try getTestSuites(in: testProducts, swiftTool: swiftTool)
+            let tests = try testSuites
+                .filteredTests(specifier: options.testCaseSpecifier)
+                .skippedTests(specifier: options.testCaseSkip)
 
             // Print the tests.
             for test in tests {
@@ -176,31 +222,40 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
             }
 
         case .codeCovPath:
-            let workspace = try getActiveWorkspace()
-            let root = try getWorkspaceRoot()
-            let rootManifest = workspace.loadRootManifests(packages: root.packages, diagnostics: diagnostics)[0]
-            let buildParameters = try self.buildParameters()
+            let workspace = try swiftTool.getActiveWorkspace()
+            let root = try swiftTool.getWorkspaceRoot()
+            let rootManifests = try temp_await {
+                workspace.loadRootManifests(packages: root.packages, diagnostics: swiftTool.diagnostics, completion: $0)                
+            }
+            guard let rootManifest = rootManifests.values.first else {
+                throw StringError("invalid manifests at \(root.packages)")
+            }
+            let buildParameters = try swiftTool.buildParametersForTest()
             print(codeCovAsJSONPath(buildParameters: buildParameters, packageName: rootManifest.name))
 
         case .generateLinuxMain:
-          #if os(Linux)
-            diagnostics.emit(warning: "can't discover tests on Linux; please use this option on macOS instead")
-          #endif
-            let graph = try loadPackageGraph()
-            let testProducts = try buildTestsIfNeeded()
-            let testSuites = try getTestSuites(in: testProducts)
+            // this functionality is deprecated as of 12/2020
+            // but we are keeping it here for transition purposes
+            // to be removed in future releases
+            // deprecation warning is emitted by validateArguments
+            #if os(Linux)
+            swiftTool.diagnostics.emit(warning: "can't discover tests on Linux; please use this option on macOS instead")
+            #endif
+            let graph = try swiftTool.loadPackageGraph()
+            let testProducts = try buildTestsIfNeeded(swiftTool: swiftTool)
+            let testSuites = try getTestSuites(in: testProducts, swiftTool: swiftTool)
             let allTestSuites = testSuites.values.flatMap { $0 }
             let generator = LinuxMainGenerator(graph: graph, testSuites: allTestSuites)
             try generator.generate()
 
         case .runSerial:
-            let toolchain = try getToolchain()
-            let testProducts = try buildTestsIfNeeded()
-            let buildParameters = try self.buildParameters()
+            let toolchain = try swiftTool.getToolchain()
+            let testProducts = try buildTestsIfNeeded(swiftTool: swiftTool)
+            let buildParameters = try swiftTool.buildParametersForTest()
 
             // Clean out the code coverage directory that may contain stale
             // profraw files from a previous run of the code coverage tool.
-            if options.shouldEnableCodeCoverage {
+            if shouldEnableCodeCoverage {
                 try localFileSystem.removeFileTree(buildParameters.codeCovPath)
             }
 
@@ -208,21 +263,27 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
 
             switch options.testCaseSpecifier {
             case .none:
-                xctestArg = nil
+                if case .skip = options.testCaseSkip {
+                    fallthrough
+                } else {
+                    xctestArg = nil
+                }
 
             case .regex, .specific, .skip:
                 // If old specifier `-s` option was used, emit deprecation notice.
                 if case .specific = options.testCaseSpecifier {
-                    diagnostics.emit(warning: "'--specifier' option is deprecated; use '--filter' instead")
+                    swiftTool.diagnostics.emit(warning: "'--specifier' option is deprecated; use '--filter' instead")
                 }
 
                 // Find the tests we need to run.
-                let testSuites = try getTestSuites(in: testProducts)
-                let tests = testSuites.filteredTests(specifier: options.testCaseSpecifier)
+                let testSuites = try getTestSuites(in: testProducts, swiftTool: swiftTool)
+                let tests = try testSuites
+                    .filteredTests(specifier: options.testCaseSpecifier)
+                    .skippedTests(specifier: options.testCaseSkip)
 
                 // If there were no matches, emit a warning.
                 if tests.isEmpty {
-                    diagnostics.emit(.noMatchingTests)
+                    swiftTool.diagnostics.emit(.noMatchingTests)
                 }
 
                 xctestArg = tests.map { $0.specifier }.joined(separator: ",")
@@ -231,87 +292,98 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
             let runner = TestRunner(
                 bundlePaths: testProducts.map { $0.bundlePath },
                 xctestArg: xctestArg,
-                processSet: processSet,
+                processSet: swiftTool.processSet,
                 toolchain: toolchain,
-                diagnostics: diagnostics,
-                options: self.options,
+                diagnostics: swiftTool.diagnostics,
+                options: swiftOptions,
                 buildParameters: buildParameters
             )
 
             // Finally, run the tests.
             let ranSuccessfully: Bool = runner.test()
             if !ranSuccessfully {
-                executionStatus = .failure
+                swiftTool.executionStatus = .failure
             }
 
-            if options.shouldEnableCodeCoverage {
-                try processCodeCoverage(testProducts)
+            if shouldEnableCodeCoverage {
+                try processCodeCoverage(testProducts, swiftTool: swiftTool)
             }
 
         case .runParallel:
-            let toolchain = try getToolchain()
-            let testProducts = try buildTestsIfNeeded()
-            let testSuites = try getTestSuites(in: testProducts)
-            let tests = testSuites.filteredTests(specifier: options.testCaseSpecifier)
-            let buildParameters = try self.buildParameters()
+            let toolchain = try swiftTool.getToolchain()
+            let testProducts = try buildTestsIfNeeded(swiftTool: swiftTool)
+            let testSuites = try getTestSuites(in: testProducts, swiftTool: swiftTool)
+            let tests = try testSuites
+                .filteredTests(specifier: options.testCaseSpecifier)
+                .skippedTests(specifier: options.testCaseSkip)
+            let buildParameters = try swiftTool.buildParametersForTest()
 
             // If there were no matches, emit a warning and exit.
             if tests.isEmpty {
-                diagnostics.emit(.noMatchingTests)
+                swiftTool.diagnostics.emit(.noMatchingTests)
                 return
             }
 
             // Clean out the code coverage directory that may contain stale
             // profraw files from a previous run of the code coverage tool.
-            if options.shouldEnableCodeCoverage {
+            if shouldEnableCodeCoverage {
                 try localFileSystem.removeFileTree(buildParameters.codeCovPath)
             }
 
             // Run the tests using the parallel runner.
             let runner = ParallelTestRunner(
                 bundlePaths: testProducts.map { $0.bundlePath },
-                processSet: processSet,
+                processSet: swiftTool.processSet,
                 toolchain: toolchain,
                 xUnitOutput: options.xUnitOutput,
                 numJobs: options.numberOfWorkers ?? ProcessInfo.processInfo.activeProcessorCount,
-                diagnostics: diagnostics,
-                options: self.options,
+                diagnostics: swiftTool.diagnostics,
+                options: swiftOptions,
                 buildParameters: buildParameters
             )
             try runner.run(tests)
 
             if !runner.ranSuccessfully {
-                executionStatus = .failure
+                swiftTool.executionStatus = .failure
             }
 
-            if options.shouldEnableCodeCoverage {
-                try processCodeCoverage(testProducts)
+            if shouldEnableCodeCoverage {
+                try processCodeCoverage(testProducts, swiftTool: swiftTool)
             }
         }
     }
 
     /// Processes the code coverage data and emits a json.
-    private func processCodeCoverage(_ testProducts: [BuiltTestProduct]) throws {
-        // Merge all the profraw files to produce a single profdata file.
-        try mergeCodeCovRawDataFiles()
+    private func processCodeCoverage(_ testProducts: [BuiltTestProduct], swiftTool: SwiftTool) throws {
+        let workspace = try swiftTool.getActiveWorkspace()
+        let root = try swiftTool.getWorkspaceRoot()
+        let rootManifests = try temp_await {
+            workspace.loadRootManifests(packages: root.packages, diagnostics: swiftTool.diagnostics, completion: $0)
+        }
+        guard let rootManifest = rootManifests.values.first else {
+            throw StringError("invalid manifests at \(root.packages)")
+        }
 
-        let buildParameters = try self.buildParameters()
+        // Merge all the profraw files to produce a single profdata file.
+        try mergeCodeCovRawDataFiles(swiftTool: swiftTool)
+
+        let buildParameters = try swiftTool.buildParametersForTest()
         for product in testProducts {
             // Export the codecov data as JSON.
             let jsonPath = codeCovAsJSONPath(
                 buildParameters: buildParameters,
-                packageName: product.packageName)
-            try exportCodeCovAsJSON(to: jsonPath, testBinary: product.binaryPath)
+                packageName: rootManifest.name)
+            try exportCodeCovAsJSON(to: jsonPath, testBinary: product.binaryPath, swiftTool: swiftTool)
         }
     }
 
     /// Merges all profraw profiles in codecoverage directory into default.profdata file.
-    private func mergeCodeCovRawDataFiles() throws {
+    private func mergeCodeCovRawDataFiles(swiftTool: SwiftTool) throws {
         // Get the llvm-prof tool.
-        let llvmProf = try getToolchain().getLLVMProf()
+        let llvmProf = try swiftTool.getToolchain().getLLVMProf()
 
         // Get the profraw files.
-        let buildParameters = try self.buildParameters()
+        let buildParameters = try swiftTool.buildParametersForTest()
         let codeCovFiles = try localFileSystem.getDirectoryContents(buildParameters.codeCovPath)
 
         // Construct arguments for invoking the llvm-prof tool.
@@ -332,10 +404,10 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
     }
 
     /// Exports profdata as a JSON file.
-    private func exportCodeCovAsJSON(to path: AbsolutePath, testBinary: AbsolutePath) throws {
+    private func exportCodeCovAsJSON(to path: AbsolutePath, testBinary: AbsolutePath, swiftTool: SwiftTool) throws {
         // Export using the llvm-cov tool.
-        let llvmCov = try getToolchain().getLLVMCov()
-        let buildParameters = try self.buildParameters()
+        let llvmCov = try swiftTool.getToolchain().getLLVMCov()
+        let buildParameters = try swiftTool.buildParametersForTest()
         let args = [
             llvmCov.pathString,
             "export",
@@ -354,8 +426,8 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
     /// Builds the "test" target if enabled in options.
     ///
     /// - Returns: The paths to the build test products.
-    private func buildTestsIfNeeded() throws -> [BuiltTestProduct] {
-        let buildSystem = try createBuildSystem()
+    private func buildTestsIfNeeded(swiftTool: SwiftTool) throws -> [BuiltTestProduct] {
+        let buildSystem = try swiftTool.createBuildSystem(buildParameters: swiftTool.buildParametersForTest())
 
         if options.shouldBuildTests {
             let subset = options.testProduct.map(BuildSubset.product) ?? .allIncludingTests
@@ -379,71 +451,14 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
         }
     }
 
-    override class func defineArguments(parser: ArgumentParser, binder: ArgumentBinder<TestToolOptions>) {
-
-        binder.bind(
-            option: parser.add(option: "--skip-build", kind: Bool.self,
-                usage: "Skip building the test target"),
-            to: { $0.shouldBuildTests = !$1 })
-
-        binder.bind(
-            option: parser.add(option: "--list-tests", shortName: "-l", kind: Bool.self,
-                usage: "Lists test methods in specifier format"),
-            to: { $0.shouldListTests = $1 })
-
-        binder.bind(
-            option: parser.add(option: "--generate-linuxmain", kind: Bool.self,
-                usage: "Generate LinuxMain.swift entries for the package"),
-            to: { $0.shouldGenerateLinuxMain = $1 })
-
-        binder.bind(
-            option: parser.add(option: "--parallel", kind: Bool.self,
-                usage: "Run the tests in parallel."),
-            to: { $0.shouldRunInParallel = $1 })
-
-        binder.bind(
-            option: parser.add(option: "--num-workers", kind: Int.self,
-                               usage: "Number of tests to execute in parallel."),
-            to: { $0.numberOfWorkers = $1 })
-
-        binder.bind(
-            option: parser.add(option: "--specifier", shortName: "-s", kind: String.self),
-            to: { $0._testCaseSpecifier = .specific($1) })
-
-        binder.bind(
-            option: parser.add(option: "--xunit-output", kind: PathArgument.self),
-            to: { $0.xUnitOutput = $1.path })
-
-        binder.bind(
-            option: parser.add(option: "--filter", kind: [String].self,
-                usage: "Run test cases matching regular expression, Format: <test-target>.<test-case> or " +
-                    "<test-target>.<test-case>/<test>"),
-            to: { $0._testCaseSpecifier = .regex($1) })
-
-        binder.bind(
-            option: parser.add(option: "--enable-code-coverage", kind: Bool.self,
-                usage: "Test with code coverage enabled"),
-            to: { $0.shouldEnableCodeCoverage = $1 })
-
-        binder.bind(
-            option: parser.add(option: "--show-codecov-path", kind: Bool.self,
-                usage: "Print the path of the exported code coverage JSON file"),
-            to: { $0.shouldPrintCodeCovPath = $1 })
-
-        binder.bind(
-            option: parser.add(option: "--test-product", kind: String.self, 
-                usage: "Test the specified product"),
-            to: { $0.testProduct = $1 })
-    }
-
     /// Locates XCTestHelper tool inside the libexec directory and bin directory.
     /// Note: It is a fatalError if we are not able to locate the tool.
     ///
     /// - Returns: Path to XCTestHelper tool.
-    private func xctestHelperPath() -> AbsolutePath {
+    private func xctestHelperPath(swiftTool: SwiftTool) throws -> AbsolutePath {
         let xctestHelperBin = "swiftpm-xctest-helper"
         let binDirectory = AbsolutePath(CommandLine.arguments.first!,
-            relativeTo: originalWorkingDirectory).parentDirectory
+            relativeTo: swiftTool.originalWorkingDirectory).parentDirectory
         // XCTestHelper tool is installed in libexec.
         let maybePath = binDirectory.parentDirectory.appending(components: "libexec", "swift", "pm", xctestHelperBin)
         if localFileSystem.isFile(maybePath) {
@@ -455,12 +470,12 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
         if localFileSystem.isFile(path) {
             return path
         }
-        fatalError("XCTestHelper binary not found.")
+        throw InternalError("XCTestHelper binary not found.")
     }
 
-    fileprivate func getTestSuites(in testProducts: [BuiltTestProduct]) throws -> [AbsolutePath: [TestSuite]] {
+    fileprivate func getTestSuites(in testProducts: [BuiltTestProduct], swiftTool: SwiftTool) throws -> [AbsolutePath: [TestSuite]] {
         let testSuitesByProduct = try testProducts
-            .map { try ($0.bundlePath, self.getTestSuites(fromTestAt: $0.bundlePath)) }
+            .map { try ($0.bundlePath, self.getTestSuites(fromTestAt: $0.bundlePath, swiftTool: swiftTool)) }
         return Dictionary(uniqueKeysWithValues: testSuitesByProduct)
     }
 
@@ -474,12 +489,12 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
     /// - Throws: TestError, SystemError, TSCUtility.Error
     ///
     /// - Returns: Array of TestSuite
-    fileprivate func getTestSuites(fromTestAt path: AbsolutePath) throws -> [TestSuite] {
+    fileprivate func getTestSuites(fromTestAt path: AbsolutePath, swiftTool: SwiftTool) throws -> [TestSuite] {
         // Run the correct tool.
       #if os(macOS)
         let data: String = try withTemporaryFile { tempFile in
-            let args = [xctestHelperPath().pathString, path.pathString, tempFile.path.pathString]
-            var env = try constructTestEnvironment(toolchain: try getToolchain(), options: self.options, buildParameters: self.buildParameters())
+            let args = [try xctestHelperPath(swiftTool: swiftTool).pathString, path.pathString, tempFile.path.pathString]
+            var env = try constructTestEnvironment(toolchain: try swiftTool.getToolchain(), options: swiftOptions, buildParameters: swiftTool.buildParametersForTest())
             // Add the sdk platform path if we have it. If this is not present, we
             // might always end up failing.
             if let sdkPlatformFrameworksPath = Destination.sdkPlatformFrameworkPaths() {
@@ -491,8 +506,9 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
             return try localFileSystem.readFileContents(tempFile.path).validDescription ?? ""
         }
       #else
+        let env = try constructTestEnvironment(toolchain: try swiftTool.getToolchain(), options: swiftOptions, buildParameters: swiftTool.buildParametersForTest())
         let args = [path.description, "--dump-tests-json"]
-        let data = try Process.checkNonZeroExit(arguments: args)
+        let data = try Process.checkNonZeroExit(arguments: args, environment: env)
       #endif
         // Parse json and return TestSuites.
         return try TestSuite.parse(jsonString: data)
@@ -501,23 +517,28 @@ public class SwiftTestTool: SwiftTool<TestToolOptions> {
     /// Private function that validates the commands arguments
     ///
     /// - Throws: if a command argument is invalid
-    private func validateArguments() throws {
-
+    private func validateArguments(diagnostics: DiagnosticsEngine) throws {
         // Validation for --num-workers.
         if let workers = options.numberOfWorkers {
 
             // The --num-worker option should be called with --parallel.
             guard options.mode == .runParallel else {
                 diagnostics.emit(error: "--num-workers must be used with --parallel")
-                throw Diagnostics.fatalError
+                throw ExitCode.failure
             }
 
             guard workers > 0 else {
                 diagnostics.emit(error: "'--num-workers' must be greater than zero")
-                throw Diagnostics.fatalError
+                throw ExitCode.failure
             }
         }
+        
+        if options.shouldGenerateLinuxMain {
+            diagnostics.emit(warning: "'--generate-linuxmain' option is deprecated; tests are automatically discovered on all platforms")
+        }
     }
+    
+    public init() {}
 }
 
 /// A structure representing an individual unit test.
@@ -556,7 +577,7 @@ final class TestRunner {
     /// Diagnostics Engine to emit diagnostics.
     let diagnostics: DiagnosticsEngine
 
-    private let options: ToolOptions
+    private let options: SwiftToolOptions
 
     private let buildParameters: BuildParameters
 
@@ -571,7 +592,7 @@ final class TestRunner {
         processSet: ProcessSet,
         toolchain: UserToolchain,
         diagnostics: DiagnosticsEngine,
-        options: ToolOptions,
+        options: SwiftToolOptions,
         buildParameters: BuildParameters
     ) {
         self.bundlePaths = bundlePaths
@@ -647,8 +668,10 @@ final class TestRunner {
             switch result.exitStatus {
             case .terminated(code: 0):
                 success = true
+#if !os(Windows)
             case .signalled(let signal):
                 output += "\n" + exitSignalText(code: signal)
+#endif
             default: break
             }
         } catch {
@@ -668,8 +691,10 @@ final class TestRunner {
             switch result.exitStatus {
             case .terminated(code: 0):
                 return true
+#if !os(Windows)
             case .signalled(let signal):
                 print(exitSignalText(code: signal))
+#endif
             default: break
             }
         } catch {
@@ -718,7 +743,7 @@ final class ParallelTestRunner {
     let toolchain: UserToolchain
     let xUnitOutput: AbsolutePath?
 
-    let options: ToolOptions
+    let options: SwiftToolOptions
     let buildParameters: BuildParameters
 
     /// Number of tests to execute in parallel.
@@ -734,7 +759,7 @@ final class ParallelTestRunner {
         xUnitOutput: AbsolutePath? = nil,
         numJobs: Int,
         diagnostics: DiagnosticsEngine,
-        options: ToolOptions,
+        options: SwiftToolOptions,
         buildParameters: BuildParameters
     ) {
         self.bundlePaths = bundlePaths
@@ -954,7 +979,7 @@ fileprivate extension Dictionary where Key == AbsolutePath, Value == [TestSuite]
     }
 
     /// Return tests matching the provided specifier
-    func filteredTests(specifier: TestCaseSpecifier) -> [UnitTest] {
+    func filteredTests(specifier: TestCaseSpecifier) throws -> [UnitTest] {
         switch specifier {
         case .none:
             return allTests
@@ -967,28 +992,36 @@ fileprivate extension Dictionary where Key == AbsolutePath, Value == [TestSuite]
             })
         case .specific(let name):
             return allTests.filter{ $0.specifier == name }
+        case .skip:
+            throw InternalError("Tests to skip should never have been passed here.")
+        }
+    }
+}
+
+fileprivate extension Array where Element == UnitTest {
+    /// Skip tests matching the provided specifier
+    func skippedTests(specifier: TestCaseSpecifier) throws -> [UnitTest] {
+        switch specifier {
+        case .none:
+            return self
         case .skip(let skippedTests):
-            var result = allTests
+            var result = self
             for skippedTest in skippedTests {
                 result = result.filter{
                     $0.specifier.range(of: skippedTest, options: .regularExpression) == nil
                 }
             }
             return result
+        case .regex, .specific:
+            throw InternalError("Tests to filter should never have been passed here.")
         }
-    }
-}
-
-extension SwiftTestTool: ToolName {
-    static var toolName: String {
-        return "swift test"
     }
 }
 
 /// Creates the environment needed to test related tools.
 fileprivate func constructTestEnvironment(
     toolchain: UserToolchain,
-    options: ToolOptions,
+    options: SwiftToolOptions,
     buildParameters: BuildParameters
 ) throws -> [String: String] {
     var env = ProcessEnv.vars
@@ -1007,6 +1040,11 @@ fileprivate func constructTestEnvironment(
     }
 
   #if !os(macOS)
+#if os(Windows)
+    if let location = toolchain.manifestResources.xctestLocation {
+      env["Path"] = "\(location.pathString);\(env["Path"] ?? "")"
+    }
+#endif
     return env
   #else
     // Fast path when no sanitizers are enabled.
@@ -1015,7 +1053,7 @@ fileprivate func constructTestEnvironment(
     }
 
     // Get the runtime libraries.
-    var runtimes = try options.sanitizers.sanitizers.map({ sanitizer in
+    var runtimes = try options.sanitizers.map({ sanitizer in
         return try toolchain.runtimeLibrary(for: sanitizer).pathString
     })
 
@@ -1086,6 +1124,15 @@ final class XUnitGenerator {
 
 private extension Diagnostic.Message {
     static var noMatchingTests: Diagnostic.Message {
-        .warning("'--filter' predicate did not match any test case")
+        .warning("No matching test cases were run")
+    }
+}
+
+private extension SwiftTool {
+    func buildParametersForTest() throws -> BuildParameters {
+        var parameters = try self.buildParameters()
+        // for test commands, alway enable building with testability enabled
+        parameters.enableTestability = true
+        return parameters
     }
 }

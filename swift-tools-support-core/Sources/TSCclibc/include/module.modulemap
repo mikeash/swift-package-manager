@@ -1,5 +1,0 @@
-module TSCclibc {
-    header "TSCclibc.h"
-    header "indexstore_functions.h"
-    export *
-}

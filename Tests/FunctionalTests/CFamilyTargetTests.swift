@@ -50,7 +50,7 @@ class CFamilyTargetTestCase: XCTestCase {
             XCTAssertDirectoryContainsFile(dir: debugPath, filename: "Sea.c.o")
             XCTAssertDirectoryContainsFile(dir: debugPath, filename: "Foo.c.o")
             let path = try SwiftPMProduct.packagePath(for: "Foo", packageRoot: packageRoot)
-            XCTAssertEqual(GitRepository(path: path).tags, ["1.2.3"])
+            XCTAssertEqual(try GitRepository(path: path).getTags(), ["1.2.3"])
         }
     }
 
@@ -74,7 +74,10 @@ class CFamilyTargetTestCase: XCTestCase {
         }
     }
 
-    func testObjectiveCPackageWithTestTarget(){
+    func testObjectiveCPackageWithTestTarget() throws {
+        // <rdar://problem/70382477> Fix and re-enable tests which run `swift test` on newly created packages
+        try XCTSkipIf(true)
+
       #if os(macOS)
         fixture(name: "CFamilyTargets/ObjCmacOSPackage") { prefix in
             // Build the package.

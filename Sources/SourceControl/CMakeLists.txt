@@ -8,22 +8,23 @@
 
 add_library(SourceControl
   GitRepository.swift
-  InMemoryGitRepository.swift
   Repository.swift
-  RepositoryManager.swift
-  SwiftPMConfig.swift)
+  RepositoryManager.swift)
 
 target_link_libraries(SourceControl PUBLIC
+  Basics
   TSCBasic
-  TSCUtility)
+  TSCUtility
+  Basics)
 
 # NOTE(compnerd) workaround for CMake not setting up include flags yet
 set_target_properties(SourceControl PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_Swift_MODULE_DIRECTORY})
 
-if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+if(USE_CMAKE_INSTALL)
 install(TARGETS SourceControl
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
 endif()
+set_property(GLOBAL APPEND PROPERTY SwiftPM_EXPORTS SourceControl)

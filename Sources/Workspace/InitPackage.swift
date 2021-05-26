@@ -8,21 +8,19 @@
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
  */
 
+import Basics
 import TSCBasic
 import PackageModel
 
 /// Create an initial template package.
 public final class InitPackage {
     /// The tool version to be used for new packages.
-    public static let newPackageToolsVersion = ToolsVersion(version: "5.3.0")
+    public static let newPackageToolsVersion = ToolsVersion.currentToolsVersion
 
     /// Options for the template package.
     public struct InitPackageOptions {
         /// The type of package to create.
         public var packageType: PackageType
-
-        /// Whether to laydown files related to corelibs-xctest manifest.
-        public var enableXCTestManifest: Bool
 
         /// The list of platforms in the manifest.
         ///
@@ -31,11 +29,9 @@ public final class InitPackage {
 
         public init(
             packageType: PackageType,
-            enableXCTestManifest: Bool = true,
             platforms: [SupportedPlatform] = []
         ) {
             self.packageType = packageType
-            self.enableXCTestManifest = enableXCTestManifest
             self.platforms = platforms
         }
     }
@@ -47,6 +43,7 @@ public final class InitPackage {
         case executable = "executable"
         case systemModule = "system-module"
         case manifest = "manifest"
+        case `extension` = "extension"
 
         public var description: String {
             return rawValue
@@ -153,8 +150,8 @@ public final class InitPackage {
 
                 var param = ".\(platform.manifestName)("
                 if supportedPlatform.isManifestAPIAvailable {
-                    if platform == .macOS {
-                        param += ".v10_\(version.minor)"
+                    if version.minor > 0 {
+                        param += ".v\(version.major)_\(version.minor)"
                     } else {
                         param += ".v\(version.major)"
                     }
@@ -190,18 +187,34 @@ public final class InitPackage {
                 """)
 
             if packageType == .library || packageType == .executable || packageType == .manifest {
-                pkgParams.append("""
+                var param = ""
+
+                param += """
                     targets: [
                         // Targets are the basic building blocks of a package. A target can define a module or a test suite.
                         // Targets can depend on other targets in this package, and on products in packages this package depends on.
-                        .target(
+
+                """
+                if packageType == .executable {
+                    param += """
+                            .executableTarget(
+                    """
+                } else {
+                    param += """
+                            .target(
+                    """
+                }
+                param += """
+
                             name: "\(pkgname)",
                             dependencies: []),
                         .testTarget(
                             name: "\(pkgname)Tests",
                             dependencies: ["\(pkgname)"]),
                     ]
-                """)
+                """
+
+                pkgParams.append(param)
             }
 
             stream <<< pkgParams.joined(separator: ",\n") <<< "\n)\n"
@@ -274,23 +287,29 @@ public final class InitPackage {
         let sourceFileName = (packageType == .executable) ? "main.swift" : "\(typeName).swift"
         let sourceFile = moduleDir.appending(RelativePath(sourceFileName))
 
-        try writePackageFile(sourceFile) { stream in
-            switch packageType {
-            case .library:
-                stream <<< """
-                    struct \(typeName) {
-                        var text = "Hello, World!"
+        let content: String
+        switch packageType {
+        case .library:
+            content = """
+                public struct \(typeName) {
+                    public private(set) var text = "Hello, World!"
+
+                    public init() {
                     }
+                }
 
-                    """
-            case .executable:
-                stream <<< """
-                    print("Hello, world!")
+                """
+        case .executable:
+            content = """
+                print("Hello, world!")
 
-                    """
-            case .systemModule, .empty, .manifest:
-                fatalError("invalid")
-            }
+                """
+        case .systemModule, .empty, .manifest, .`extension`:
+            throw InternalError("invalid packageType \(packageType)")
+        }
+
+        try writePackageFile(sourceFile) { stream in
+            stream.write(content)
         }
     }
 
@@ -327,26 +346,9 @@ public final class InitPackage {
         try makeDirectories(tests)
 
         switch packageType {
-        case .systemModule, .empty, .manifest: break
+        case .systemModule, .empty, .manifest, .`extension`: break
         case .library, .executable:
-            try writeLinuxMain(testsPath: tests)
             try writeTestFileStubs(testsPath: tests)
-        }
-    }
-
-    private func writeLinuxMain(testsPath: AbsolutePath) throws {
-        guard options.enableXCTestManifest else { return }
-        try writePackageFile(testsPath.appending(component: "LinuxMain.swift")) { stream in
-            stream <<< """
-                import XCTest
-
-                import \(moduleName)Tests
-
-                var tests = [XCTestCaseEntry]()
-                tests += \(moduleName)Tests.allTests()
-                XCTMain(tests)
-
-                """
         }
     }
 
@@ -357,29 +359,15 @@ public final class InitPackage {
                 @testable import \(moduleName)
 
                 final class \(moduleName)Tests: XCTestCase {
-                    func testExample() {
+                    func testExample() throws {
                         // This is an example of a functional test case.
                         // Use XCTAssert and related functions to verify your tests produce the correct
                         // results.
                         XCTAssertEqual(\(typeName)().text, "Hello, World!")
                     }
-
-            """
-
-            if options.enableXCTestManifest {
-                stream <<< """
-
-                        static var allTests = [
-                            ("testExample", testExample),
-                        ]
-
-                """
-            }
-
-            stream <<< """
                 }
 
-            """
+                """
         }
     }
 
@@ -400,6 +388,9 @@ public final class InitPackage {
                             return
                         }
 
+                        // Mac Catalyst won't have `Process`, but it is supported for executables.
+                        #if !targetEnvironment(macCatalyst)
+
                         let fooBinary = productsDirectory.appendingPathComponent("\(pkgname)")
 
                         let process = Process()
@@ -415,6 +406,7 @@ public final class InitPackage {
                         let output = String(data: data, encoding: .utf8)
 
                         XCTAssertEqual(output, "Hello, world!\\n")
+                        #endif
                     }
 
                     /// Returns path to the built products directory.
@@ -428,20 +420,6 @@ public final class InitPackage {
                         return Bundle.main.bundleURL
                       #endif
                     }
-
-                """
-
-            if options.enableXCTestManifest {
-                stream <<< """
-
-                    static var allTests = [
-                        ("testExample", testExample),
-                    ]
-
-                """
-            }
-
-            stream <<< """
                 }
 
                 """
@@ -455,31 +433,11 @@ public final class InitPackage {
 
         let testClassFile = testModule.appending(RelativePath("\(moduleName)Tests.swift"))
         switch packageType {
-        case .systemModule, .empty, .manifest: break
+        case .systemModule, .empty, .manifest, .`extension`: break
         case .library:
             try writeLibraryTestsFile(testClassFile)
         case .executable:
             try writeExecutableTestsFile(testClassFile)
-        }
-
-        try writeXCTestManifest(testModule)
-    }
-
-    func writeXCTestManifest(_ testModule: AbsolutePath) throws {
-        guard options.enableXCTestManifest else { return }
-        try writePackageFile(testModule.appending(component: "XCTestManifests.swift")) { stream in
-            stream <<< """
-                import XCTest
-
-                #if !canImport(ObjectiveC)
-                public func allTests() -> [XCTestCaseEntry] {
-                    return [
-                        testCase(\(moduleName)Tests.allTests),
-                    ]
-                }
-                #endif
-
-                """
         }
     }
 }
@@ -504,12 +462,16 @@ extension PackageModel.Platform {
         switch self {
         case .macOS:
             return "macOS"
+        case .macCatalyst:
+            return "macCatalyst"
         case .iOS:
             return "iOS"
         case .tvOS:
             return "tvOS"
         case .watchOS:
             return "watchOS"
+        case .driverKit:
+            return "DriverKit"
         default:
             fatalError("unexpected manifest name call for platform \(self)")
         }
@@ -518,11 +480,11 @@ extension PackageModel.Platform {
 
 extension SupportedPlatform {
     var isManifestAPIAvailable: Bool {
-        if platform == .macOS {
-            guard self.version.major == 10, self.version.patch == 0 else {
+        if platform == .macOS && self.version.major == 10 {
+            guard self.version.patch == 0 else {
                 return false
             }
-        } else if [Platform.iOS, .watchOS, .tvOS].contains(platform) {
+        } else if [Platform.macOS, .macCatalyst, .iOS, .watchOS, .tvOS, .driverKit].contains(platform) {
             guard self.version.minor == 0, self.version.patch == 0 else {
                 return false
             }
@@ -531,14 +493,20 @@ extension SupportedPlatform {
         }
 
         switch platform {
-        case .macOS:
+        case .macOS where version.major == 10:
             return (10...15).contains(version.minor)
+        case .macOS:
+            return (11...11).contains(version.major)
+        case .macCatalyst:
+            return (13...14).contains(version.major)
         case .iOS:
-            return (8...13).contains(version.major)
+            return (8...14).contains(version.major)
         case .tvOS:
-            return (9...13).contains(version.major)
+            return (9...14).contains(version.major)
         case .watchOS:
-            return (2...6).contains(version.major)
+            return (2...7).contains(version.major)
+        case .driverKit:
+            return (19...20).contains(version.major)
 
         default:
             return false

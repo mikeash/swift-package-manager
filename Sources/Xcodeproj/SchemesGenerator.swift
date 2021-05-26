@@ -1,7 +1,7 @@
 /*
  This source file is part of the Swift.org open source project
 
- Copyright (c) 2018 Apple Inc. and the Swift project authors
+ Copyright (c) 2018 - 2021 Apple Inc. and the Swift project authors
  Licensed under Apache License v2.0 with Runtime Library Exception
 
  See http://swift.org/LICENSE.txt for license information
@@ -58,12 +58,12 @@ public final class SchemesGenerator {
         self.fs = fs
     }
 
-    public func buildSchemes() -> [Scheme] {
+    public func buildSchemes() throws -> [Scheme] {
         let rootPackage = graph.rootPackages[0]
 
         var schemes: [Scheme] = []
 
-        let testTargetsMap = graph.computeTestTargetsForExecutableTargets()
+        let testTargetsMap = try graph.computeTestTargetsForExecutableTargets()
 
         // Create one scheme per executable target.
         for target in rootPackage.targets where target.type == .executable {
@@ -79,14 +79,14 @@ public final class SchemesGenerator {
         // Finally, create one master scheme for the entire package.
         let regularTargets = rootPackage.targets.filter({ 
             switch $0.type {
-            case .test, .systemModule, .binary:
+            case .test, .systemModule, .binary, .plugin:
                 return false
             case .executable, .library:
                 return true
             }
         })
         schemes.append(Scheme(
-            name: rootPackage.name + "-Package",
+            name: rootPackage.manifestName + "-Package", // TODO: use identity instead?
             regularTargets: regularTargets,
             testTargets: rootPackage.targets.filter({ $0.type == .test })
         ))
@@ -95,7 +95,7 @@ public final class SchemesGenerator {
     }
 
     func generate() throws {
-        let schemes = buildSchemes()
+        let schemes = try self.buildSchemes()
         for scheme in schemes {
             try create(scheme)
         }
@@ -116,7 +116,7 @@ public final class SchemesGenerator {
             """
 
         // Create buildable references for non-test targets.
-        for target in scheme.regularTargets {
+        for target in scheme.regularTargets.sorted(by: { $0.name < $1.name }) {
             stream <<< """
                       <BuildActionEntry buildForTesting = "YES" buildForRunning = "YES" buildForProfiling = "YES" buildForArchiving = "YES" buildForAnalyzing = "YES">
                         <BuildableReference
@@ -148,7 +148,7 @@ public final class SchemesGenerator {
             """
 
         // Create testable references.
-        for target in scheme.testTargets {
+        for target in scheme.testTargets.sorted(by: { $0.name < $1.name }) {
             stream <<< """
                         <TestableReference
                           skipped = "NO">

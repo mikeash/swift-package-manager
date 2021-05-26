@@ -78,15 +78,14 @@ struct APIDigesterBaselineDumper {
 
         // Clone the current package in a sandbox and checkout the baseline revision.
         let specifier = RepositorySpecifier(url: baselinePackageRoot.pathString)
-        try repositoryManager.provider.cloneCheckout(
+        let workingCopy = try repositoryManager.provider.createWorkingCopy(
             repository: specifier,
-            at: packageRoot,
-            to: baselinePackageRoot,
+            sourcePath: packageRoot,
+            at: baselinePackageRoot,
             editable: false
         )
 
-        let workingCheckout = try repositoryManager.provider.openCheckout(at: baselinePackageRoot)
-        try workingCheckout.checkout(revision: Revision(identifier: baselineTreeish))
+        try workingCopy.checkout(revision: Revision(identifier: baselineTreeish))
 
         // Create the workspace for this package.
         let workspace = Workspace.create(
@@ -95,8 +94,8 @@ struct APIDigesterBaselineDumper {
             repositoryManager: repositoryManager
         )
 
-        let graph = workspace.loadPackageGraph(
-            root: baselinePackageRoot, diagnostics: diags)
+        let graph = try workspace.loadPackageGraph(
+            rootPath: baselinePackageRoot, diagnostics: diags)
 
         // Abort if we weren't able to load the package graph.
         if diags.hasErrors {
@@ -110,8 +109,9 @@ struct APIDigesterBaselineDumper {
         // Build the baseline module.
         let buildOp = BuildOperation(
             buildParameters: buildParameters,
-            useBuildManifestCaching: false,
+            cacheBuildManifest: false,
             packageGraphLoader: { graph },
+            pluginInvoker: { _ in [:] },
             diagnostics: diags,
             stdoutStream: stdoutStream
         )
@@ -124,7 +124,7 @@ struct APIDigesterBaselineDumper {
         try apiDigesterTool.dumpSDKJSON(
             at: sdkJSON,
             modules: graph.apiDigesterModules,
-            additionalArgs: buildOp.buildPlan!.createAPIDigesterArgs()
+            additionalArgs: buildOp.buildPlan!.createAPIToolCommonArgs(includeLibrarySearchPaths: false)
         )
 
         return sdkJSON
@@ -159,16 +159,18 @@ public struct SwiftAPIDigester {
     }
 
     public func diagnoseSDK(
-        currentSDKJSON: AbsolutePath,
-        baselineSDKJSON: AbsolutePath
+        baselineSDKJSON: AbsolutePath,
+        apiToolArgs: [String],
+        modules: [String]
     ) throws {
-        let args = [
+        var args = [
             "-diagnose-sdk",
-            "--input-paths",
-            baselineSDKJSON.pathString,
-            "-input-paths",
-            currentSDKJSON.pathString,
+            "-baseline-path", baselineSDKJSON.pathString,
         ]
+        args.append(contentsOf: apiToolArgs)
+        for module in modules {
+            args.append(contentsOf: ["-module", module])
+        }
 
         try runTool(args)
     }

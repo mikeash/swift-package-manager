@@ -13,14 +13,13 @@ import SPMTestSupport
 import TSCBasic
 import PackageModel
 import Workspace
-import Commands
 
 class InitTests: XCTestCase {
 
     // MARK: TSCBasic package creation for each package type.
     
     func testInitPackageEmpty() throws {
-        mktmpdir { tmpPath in
+        try testWithTemporaryDirectory { tmpPath in
             let fs = localFileSystem
             let path = tmpPath.appending(component: "Foo")
             let name = path.basename
@@ -51,7 +50,7 @@ class InitTests: XCTestCase {
     }
     
     func testInitPackageExecutable() throws {
-        mktmpdir { tmpPath in
+        try testWithTemporaryDirectory { tmpPath in
             let fs = localFileSystem
             let path = tmpPath.appending(component: "Foo")
             let name = path.basename
@@ -84,19 +83,21 @@ class InitTests: XCTestCase {
             XCTAssertEqual(try fs.getDirectoryContents(path.appending(component: "Sources").appending(component: "Foo")), ["main.swift"])
             XCTAssertEqual(
                 try fs.getDirectoryContents(path.appending(component: "Tests")).sorted(),
-                ["FooTests", "LinuxMain.swift"])
+                ["FooTests"])
             
-            // Try building it
-            XCTAssertBuilds(path)
-            let triple = Resources.default.toolchain.triple
-            let binPath = path.appending(components: ".build", triple.tripleString, "debug")
-            XCTAssertFileExists(binPath.appending(component: "Foo"))
-            XCTAssertFileExists(binPath.appending(component: "Foo.swiftmodule"))
+            // If we have a compiler that supports `-entry-point-function-name`, we try building it (we need that flag now).
+            if (Resources.default.swiftCompilerSupportsRenamingMainSymbol) {
+                XCTAssertBuilds(path)
+                let triple = Resources.default.toolchain.triple
+                let binPath = path.appending(components: ".build", triple.tripleString, "debug")
+                XCTAssertFileExists(binPath.appending(component: "Foo"))
+                XCTAssertFileExists(binPath.appending(components: "Foo.swiftmodule"))
+            }
         }
     }
 
     func testInitPackageLibrary() throws {
-        mktmpdir { tmpPath in
+        try testWithTemporaryDirectory { tmpPath in
             let fs = localFileSystem
             let path = tmpPath.appending(component: "Foo")
             let name = path.basename
@@ -126,9 +127,19 @@ class InitTests: XCTestCase {
             XCTAssertTrue(readmeContents.hasPrefix("# Foo\n"))
 
             XCTAssertEqual(try fs.getDirectoryContents(path.appending(component: "Sources").appending(component: "Foo")), ["Foo.swift"])
+
+            let tests = path.appending(component: "Tests")
             XCTAssertEqual(
-                try fs.getDirectoryContents(path.appending(component: "Tests")).sorted(),
-                ["FooTests", "LinuxMain.swift"])
+                try fs.getDirectoryContents(tests).sorted(),
+                ["FooTests"])
+
+            let testFile = tests.appending(component: "FooTests").appending(component: "FooTests.swift")
+            let testFileContents = try localFileSystem.readFileContents(testFile).description
+            XCTAssertTrue(testFileContents.hasPrefix("import XCTest"), """
+                          Validates formatting of XCTest source file, in particular that it does not contain leading whitespace:
+                          \(testFileContents)
+                          """)
+            XCTAssertTrue(testFileContents.contains("func testExample() throws"), "Contents:\n\(testFileContents)")
 
             // Try building it
             XCTAssertBuilds(path)
@@ -138,7 +149,7 @@ class InitTests: XCTestCase {
     }
     
     func testInitPackageSystemModule() throws {
-        mktmpdir { tmpPath in
+        try testWithTemporaryDirectory { tmpPath in
             let fs = localFileSystem
             let path = tmpPath.appending(component: "Foo")
             let name = path.basename
@@ -168,7 +179,7 @@ class InitTests: XCTestCase {
     }
 
     func testInitManifest() throws {
-        mktmpdir { tmpPath in
+        try testWithTemporaryDirectory { tmpPath in
             let fs = localFileSystem
             let path = tmpPath.appending(component: "Foo")
             let name = path.basename
@@ -208,8 +219,7 @@ class InitTests: XCTestCase {
             
             // Create the package
             let initPackage = try InitPackage(name: packageName, destinationPath: packageRoot, packageType: InitPackage.PackageType.library)
-            initPackage.progressReporter = { message in
-            }
+            initPackage.progressReporter = { message in }
             try initPackage.writePackageStructure()
 
             // Try building it.
@@ -220,6 +230,9 @@ class InitTests: XCTestCase {
     }
     
     func testNonC99NameExecutablePackage() throws {
+        // <rdar://problem/70382477> Fix and re-enable tests which run `swift test` on newly created packages
+        try XCTSkipIf(true)
+
         try withTemporaryDirectory(removeTreeOnDeinit: true) { tempDirPath in
             XCTAssertTrue(localFileSystem.isDirectory(tempDirPath))
             
@@ -236,41 +249,6 @@ class InitTests: XCTestCase {
             #else
               XCTAssertBuilds(packageRoot)
             #endif
-        }
-    }
-
-    func testXCTestManifestOption() throws {
-        try withTemporaryDirectory(removeTreeOnDeinit: true) { tempDirPath in
-            var options = InitPackage.InitPackageOptions(packageType: .library)
-
-            func assertTestManifestFiles(options: InitPackage.InitPackageOptions, expected: Bool) throws {
-                let packageRoot = tempDirPath.appending(component: "Foo")
-                try localFileSystem.removeFileTree(packageRoot)
-                try localFileSystem.createDirectory(packageRoot)
-
-                let initPackage = try InitPackage(
-                    name: "Foo",
-                    destinationPath: packageRoot,
-                    options: options
-                )
-                var progressMessages = [String]()
-                initPackage.progressReporter = { message in
-                    progressMessages.append(message)
-                }
-                try initPackage.writePackageStructure()
-
-                let linuxMain = packageRoot.appending(RelativePath("Tests/LinuxMain.swift"))
-                let xctManifest = packageRoot.appending(RelativePath("Tests/FooTests/XCTestManifests.swift"))
-
-                XCTAssertEqual(localFileSystem.isFile(linuxMain), expected, "\(progressMessages)")
-                XCTAssertEqual(localFileSystem.isFile(xctManifest), expected, "\(progressMessages)")
-            }
-
-            options.enableXCTestManifest = true
-            try assertTestManifestFiles(options: options, expected: true)
-
-            options.enableXCTestManifest = false
-            try assertTestManifestFiles(options: options, expected: false)
         }
     }
 

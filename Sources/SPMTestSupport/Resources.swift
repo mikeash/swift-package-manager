@@ -9,11 +9,11 @@
 */
 
 import TSCBasic
-import Build
+import SPMBuildCore
 import Foundation
-import Commands
 import PackageLoading
 import Workspace
+import Build
 
 #if os(macOS)
 private func bundleRoot() -> AbsolutePath {
@@ -36,6 +36,10 @@ public class Resources: ManifestResourceProvider {
 
     public var binDir: AbsolutePath? {
         return toolchain.manifestResources.binDir
+    }
+
+    public var swiftCompilerFlags: [String] {
+        return []
     }
 
   #if os(macOS)
@@ -62,4 +66,6 @@ public class Resources: ManifestResourceProvider {
     public static var havePD4Runtime: Bool {
         return Resources.default.binDir == nil
     }
+    
+    public let swiftCompilerSupportsRenamingMainSymbol = SwiftTargetBuildDescription.checkSupportedFrontendFlags(flags: ["entry-point-function-name"], fs: localFileSystem)
 }

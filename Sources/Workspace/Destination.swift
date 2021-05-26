@@ -1,6 +1,5 @@
 import TSCBasic
 import TSCUtility
-import Build
 import SPMBuildCore
 
 public enum DestinationError: Swift.Error {
@@ -77,9 +76,9 @@ public struct Destination: Encodable, Equatable {
     /// - Parameter originalWorkingDirectory: The working directory when the program was launched.
     private static func hostBinDir(
         originalWorkingDirectory: AbsolutePath? = localFileSystem.currentWorkingDirectory
-    ) -> AbsolutePath {
+    ) throws -> AbsolutePath {
         guard let cwd = originalWorkingDirectory else {
-            return try! AbsolutePath(validating: CommandLine.arguments[0]).parentDirectory
+            return try AbsolutePath(validating: CommandLine.arguments[0]).parentDirectory
         }
         return AbsolutePath(CommandLine.arguments[0], relativeTo: cwd).parentDirectory
     }
@@ -94,12 +93,12 @@ public struct Destination: Encodable, Equatable {
         let customBinDir = ProcessEnv
             .vars["SWIFTPM_CUSTOM_BINDIR"]
             .flatMap{ try? AbsolutePath(validating: $0) }
-        let binDir = customBinDir ?? binDir ?? Destination.hostBinDir(
+        let binDir = try customBinDir ?? binDir ?? Destination.hostBinDir(
             originalWorkingDirectory: originalWorkingDirectory)
 
-      #if os(macOS)
+        let sdkPath: AbsolutePath?
+#if os(macOS)
         // Get the SDK.
-        let sdkPath: AbsolutePath
         if let value = lookupExecutablePath(filename: ProcessEnv.vars["SDKROOT"]) {
             sdkPath = value
         } else {
@@ -111,16 +110,34 @@ public struct Destination: Encodable, Equatable {
             }
             sdkPath = AbsolutePath(sdkPathStr)
         }
+#else
+        sdkPath = nil
+#endif
 
         // Compute common arguments for clang and swift.
         var extraCCFlags: [String] = []
         var extraSwiftCFlags: [String] = []
+#if os(macOS)
         if let sdkPaths = Destination.sdkPlatformFrameworkPaths(environment: environment) {
             extraCCFlags += ["-F", sdkPaths.fwk.pathString]
             extraSwiftCFlags += ["-F", sdkPaths.fwk.pathString]
             extraSwiftCFlags += ["-I", sdkPaths.lib.pathString]
             extraSwiftCFlags += ["-L", sdkPaths.lib.pathString]
         }
+#endif
+
+#if !os(Windows)
+        extraCCFlags += ["-fPIC"]
+#endif
+
+        var extraCPPFlags: [String] = []
+#if os(macOS)
+        extraCPPFlags += ["-lc++"]
+#elseif os(Windows)
+        extraCPPFlags += []
+#else
+        extraCPPFlags += ["-lstdc++"]
+#endif
 
         return Destination(
             target: nil,
@@ -128,27 +145,8 @@ public struct Destination: Encodable, Equatable {
             binDir: binDir,
             extraCCFlags: extraCCFlags,
             extraSwiftCFlags: extraSwiftCFlags,
-            extraCPPFlags: ["-lc++"]
+            extraCPPFlags: extraCPPFlags
         )
-      #elseif os(Android)
-        return Destination(
-            target: nil,
-            sdk: AbsolutePath(ProcessEnv.vars["PREFIX"]!).parentDirectory,
-            binDir: binDir,
-            extraCCFlags: ["-fPIC"],
-            extraSwiftCFlags: [],
-            extraCPPFlags: ["-lstdc++"]
-        )
-      #else
-        return Destination(
-            target: nil,
-            sdk: nil,
-            binDir: binDir,
-            extraCCFlags: ["-fPIC"],
-            extraSwiftCFlags: [],
-            extraCPPFlags: ["-lstdc++"]
-        )
-      #endif
     }
 
     /// Returns macosx sdk platform framework path.

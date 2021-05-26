@@ -29,7 +29,7 @@ class InMemoryGitRepositoryTests: XCTestCase {
         XCTAssertEqual(try repo.readFileContents(filePath), "one")
         XCTAssertTrue(repo.hasUncommittedChanges())
 
-        let firstCommit = repo.commit()
+        let firstCommit = try repo.commit()
         XCTAssertTrue(!repo.hasUncommittedChanges())
 
         XCTAssertEqual(try repo.readFileContents(filePath), "one")
@@ -39,7 +39,7 @@ class InMemoryGitRepositoryTests: XCTestCase {
         XCTAssertEqual(try repo.readFileContents(filePath), "two")
         XCTAssertTrue(repo.hasUncommittedChanges())
 
-        let secondCommit = repo.commit()
+        let secondCommit = try repo.commit()
         XCTAssertTrue(!repo.hasUncommittedChanges())
         XCTAssertEqual(try repo.readFileContents(filePath), "two")
 
@@ -56,9 +56,9 @@ class InMemoryGitRepositoryTests: XCTestCase {
         XCTAssertTrue(!repo.hasUncommittedChanges())
         XCTAssertEqual(try repo.readFileContents(filePath), "two")
 
-        XCTAssert(repo.tags.isEmpty)
+        XCTAssert(try repo.getTags().isEmpty)
         try repo.tag(name: "2.0.0")
-        XCTAssertEqual(repo.tags, ["2.0.0"])
+        XCTAssertEqual(try repo.getTags(), ["2.0.0"])
         XCTAssertTrue(!repo.hasUncommittedChanges())
         XCTAssertEqual(try repo.readFileContents(filePath), "two")
         XCTAssertEqual(try fs.readFileContents(filePath), "two")
@@ -81,10 +81,10 @@ class InMemoryGitRepositoryTests: XCTestCase {
         try repo.createDirectory(AbsolutePath("/new-dir/subdir"), recursive: true)
         let filePath = AbsolutePath("/new-dir/subdir").appending(component: "new-file.txt")
         try repo.writeFileContents(filePath, bytes: "one")
-        repo.commit()
+        try repo.commit()
         try repo.tag(name: v1)
         try repo.writeFileContents(filePath, bytes: "two")
-        repo.commit()
+        try repo.commit()
         try repo.tag(name: v2)
 
         let provider = InMemoryGitRepositoryProvider()
@@ -96,16 +96,16 @@ class InMemoryGitRepositoryTests: XCTestCase {
 
         // Adding a new tag in original repo shouldn't show up in fetched repo.
         try repo.tag(name: "random")
-        XCTAssertEqual(fooRepo.tags.sorted(), [v1, v2])
+        XCTAssertEqual(try fooRepo.getTags().sorted(), [v1, v2])
         XCTAssert(fooRepo.exists(revision: try fooRepo.resolveRevision(tag: v1)))
 
         let fooCheckoutPath = AbsolutePath("/fooCheckout")
-        XCTAssertFalse(try provider.checkoutExists(at: fooCheckoutPath))
-        try provider.cloneCheckout(repository: specifier, at: fooRepoPath, to: fooCheckoutPath, editable: false)
-        XCTAssertTrue(try provider.checkoutExists(at: fooCheckoutPath))
-        let fooCheckout = try provider.openCheckout(at: fooCheckoutPath)
+        XCTAssertFalse(try provider.workingCopyExists(at: fooCheckoutPath))
+        _ = try provider.createWorkingCopy(repository: specifier, sourcePath: fooRepoPath, at: fooCheckoutPath, editable: false)
+        XCTAssertTrue(try provider.workingCopyExists(at: fooCheckoutPath))
+        let fooCheckout = try provider.openWorkingCopy(at: fooCheckoutPath)
 
-        XCTAssertEqual(fooCheckout.tags.sorted(), [v1, v2])
+        XCTAssertEqual(try fooCheckout.getTags().sorted(), [v1, v2])
         XCTAssert(fooCheckout.exists(revision: try fooCheckout.getCurrentRevision()))
         let checkoutRepo = provider.openRepo(at: fooCheckoutPath)
 

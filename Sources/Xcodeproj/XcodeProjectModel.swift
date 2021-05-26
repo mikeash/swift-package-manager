@@ -354,6 +354,7 @@ public struct Xcode {
             public var CLANG_ENABLE_OBJC_ARC: String?
             public var COMBINE_HIDPI_IMAGES: String?
             public var COPY_PHASE_STRIP: String?
+            public var CURRENT_PROJECT_VERSION: String?
             public var DEBUG_INFORMATION_FORMAT: String?
             public var DEFINES_MODULE: String?
             public var DYLIB_INSTALL_NAME_BASE: String?
@@ -372,6 +373,7 @@ public struct Xcode {
             public var IPHONEOS_DEPLOYMENT_TARGET: String?
             public var TVOS_DEPLOYMENT_TARGET: String?
             public var WATCHOS_DEPLOYMENT_TARGET: String?
+            public var DRIVERKIT_DEPLOYMENT_TARGET: String?
             public var MODULEMAP_FILE: String?
             public var ONLY_ACTIVE_ARCH: String?
             public var OTHER_CFLAGS: [String]?
@@ -385,6 +387,7 @@ public struct Xcode {
             public var SDKROOT: String?
             public var SKIP_INSTALL: String?
             public var SUPPORTED_PLATFORMS: [String]?
+            public var SUPPORTS_MACCATALYST: String?
             public var SWIFT_ACTIVE_COMPILATION_CONDITIONS: [String]?
             public var SWIFT_FORCE_STATIC_LINK_STDLIB: String?
             public var SWIFT_FORCE_DYNAMIC_LINK_STDLIB: String?
@@ -400,6 +403,7 @@ public struct Xcode {
                 CLANG_ENABLE_OBJC_ARC: String? = nil,
                 COMBINE_HIDPI_IMAGES: String? = nil,
                 COPY_PHASE_STRIP: String? = nil,
+                CURRENT_PROJECT_VERSION: String? = nil,
                 DEBUG_INFORMATION_FORMAT: String? = nil,
                 DEFINES_MODULE: String? = nil,
                 DYLIB_INSTALL_NAME_BASE: String? = nil,
@@ -418,6 +422,7 @@ public struct Xcode {
                 IPHONEOS_DEPLOYMENT_TARGET: String? = nil,
                 TVOS_DEPLOYMENT_TARGET: String? = nil,
                 WATCHOS_DEPLOYMENT_TARGET: String? = nil,
+                DRIVERKIT_DEPLOYMENT_TARGET: String? = nil,
                 MODULEMAP_FILE: String? = nil,
                 ONLY_ACTIVE_ARCH: String? = nil,
                 OTHER_CFLAGS: [String]? = nil,
@@ -431,6 +436,7 @@ public struct Xcode {
                 SDKROOT: String? = nil,
                 SKIP_INSTALL: String? = nil,
                 SUPPORTED_PLATFORMS: [String]? = nil,
+                SUPPORTS_MACCATALYST: String? = nil,
                 SWIFT_ACTIVE_COMPILATION_CONDITIONS: [String]? = nil,
                 SWIFT_FORCE_STATIC_LINK_STDLIB: String? = nil,
                 SWIFT_FORCE_DYNAMIC_LINK_STDLIB: String? = nil,
@@ -445,6 +451,7 @@ public struct Xcode {
                 self.CLANG_ENABLE_OBJC_ARC = CLANG_CXX_LANGUAGE_STANDARD
                 self.COMBINE_HIDPI_IMAGES = COMBINE_HIDPI_IMAGES
                 self.COPY_PHASE_STRIP = COPY_PHASE_STRIP
+                self.CURRENT_PROJECT_VERSION = CURRENT_PROJECT_VERSION
                 self.DEBUG_INFORMATION_FORMAT = DEBUG_INFORMATION_FORMAT
                 self.DEFINES_MODULE = DEFINES_MODULE
                 self.DYLIB_INSTALL_NAME_BASE = DYLIB_INSTALL_NAME_BASE
@@ -463,6 +470,7 @@ public struct Xcode {
                 self.IPHONEOS_DEPLOYMENT_TARGET = IPHONEOS_DEPLOYMENT_TARGET
                 self.TVOS_DEPLOYMENT_TARGET = TVOS_DEPLOYMENT_TARGET
                 self.WATCHOS_DEPLOYMENT_TARGET = WATCHOS_DEPLOYMENT_TARGET
+                self.DRIVERKIT_DEPLOYMENT_TARGET = DRIVERKIT_DEPLOYMENT_TARGET
                 self.MODULEMAP_FILE = MODULEMAP_FILE
                 self.ONLY_ACTIVE_ARCH = ONLY_ACTIVE_ARCH
                 self.OTHER_CFLAGS = OTHER_CFLAGS
@@ -476,6 +484,7 @@ public struct Xcode {
                 self.SDKROOT = SDKROOT
                 self.SKIP_INSTALL = SKIP_INSTALL
                 self.SUPPORTED_PLATFORMS = SUPPORTED_PLATFORMS
+                self.SUPPORTS_MACCATALYST = SUPPORTS_MACCATALYST
                 self.SWIFT_ACTIVE_COMPILATION_CONDITIONS = SWIFT_ACTIVE_COMPILATION_CONDITIONS
                 self.SWIFT_FORCE_STATIC_LINK_STDLIB = SWIFT_FORCE_STATIC_LINK_STDLIB
                 self.SWIFT_FORCE_DYNAMIC_LINK_STDLIB = SWIFT_FORCE_DYNAMIC_LINK_STDLIB

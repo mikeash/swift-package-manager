@@ -4,7 +4,7 @@ The Swift Package Manager is a tool for managing distribution of source code, ai
 
 We’ve designed the system to make it easy to share packages on services like GitHub, but packages are also great for private personal development, sharing code within a team, or at any other granularity.
 
-Swift Package Manager includes a build system that can build for macOS and Linux. Xcode 11 integrates with libSwiftPM to provide support for iOS, watchOS, and tvOS platforms.
+Swift Package Manager includes a build system that can build for macOS and Linux. Starting with Xcode 11, Xcode integrates with libSwiftPM to provide support for iOS, watchOS, and tvOS platforms.
 
 The [SourceKit-LSP](https://github.com/apple/sourcekit-lsp) project leverages libSwiftPM and provides [Language Server Protocol](https://langserver.org/) implementation for editors that support LSP.
 
@@ -35,9 +35,11 @@ For Quick Help use the ```swift package --help ``` command.
 
 For extensive documentation on using Swift Package Manager, creating packages, and more, see [Documentation](Documentation).
 
-For additional documentation on developing the Swift Package Manager itself, see [Documentation/Development](Documentation/Development.md).
+For additional documentation on developing the Swift Package Manager itself, see [Documentation/Contributing](Documentation/Contributing.md).
 
 For detailed documentation on the package manifest API, see [PackageDescription API](https://docs.swift.org/package-manager/PackageDescription/index.html).
+
+For release notes with information about changes between versions, see [Release Notes](Documentation/ReleaseNotes).
 
 ---
 
@@ -107,13 +109,9 @@ If you’re not comfortable sharing your question with the list, contact details
 
 ## Contributions
 
-To learn about the policies and best practices that govern contributions to the Swift project, please read the [Contributor Guide](https://swift.org/contributing/).
+There are several ways to contribute to Swift Package Manager. To learn about the policies, best practices that govern contributions to the Swift project and instructions for setting up the development environment please read the [Contributor Guide](Documentation/Contributing.md).  
 
-If you are interested in contributing, please read the [Community Proposal](Documentation/Internals/PackageManagerCommunityProposal.md), which provides some context for decisions made in the current implementation and offers direction for the development of future features.
-
-Instructions for setting up the development environment are available [here](Documentation/Development.md).
-
-The Swift package manager uses [llbuild](https://github.com/apple/swift-llbuild) as the underlying build system for compiling source files.  It is also open source and part of the Swift project.
+The Swift package manager uses [llbuild](https://github.com/apple/swift-llbuild) as the underlying build system for compiling source files. It is also open source and part of the Swift project.
 
 ---
 

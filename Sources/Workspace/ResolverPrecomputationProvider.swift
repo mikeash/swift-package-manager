@@ -8,6 +8,7 @@
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
  */
 
+import Dispatch
 import PackageModel
 import PackageGraph
 import TSCBasic
@@ -37,58 +38,52 @@ struct ResolverPrecomputationProvider: PackageContainerProvider {
     /// The managed manifests to make available to the resolver.
     let dependencyManifests: Workspace.DependencyManifests
 
-    /// The SwiftPM config.
-    let config: SwiftPMConfig
-
     /// The tools version currently in use.
     let currentToolsVersion: ToolsVersion
 
     init(
         root: PackageGraphRoot,
         dependencyManifests: Workspace.DependencyManifests,
-        config: SwiftPMConfig,
         currentToolsVersion: ToolsVersion = ToolsVersion.currentToolsVersion
     ) {
         self.root = root
         self.dependencyManifests = dependencyManifests
-        self.config = config
         self.currentToolsVersion = currentToolsVersion
     }
 
     func getContainer(
-        for identifier: PackageReference,
+        for package: PackageReference,
         skipUpdate: Bool,
+        on queue: DispatchQueue,
         completion: @escaping (Result<PackageContainer, Error>) -> Void
     ) {
-        // Start by searching manifests from the Workspace's resolved dependencies.
-        if let manifest = dependencyManifests.dependencies.first(where: { _, managed, _ in managed.packageRef == identifier }) {
-            let container = LocalPackageContainer(
-                package: identifier,
-                manifest: manifest.manifest,
-                dependency: manifest.dependency,
-                config: config,
-                currentToolsVersion: currentToolsVersion
-            )
+        queue.async {
+            // Start by searching manifests from the Workspace's resolved dependencies.
+            if let manifest = self.dependencyManifests.dependencies.first(where: { _, managed, _ in managed.packageRef == package }) {
+                let container = LocalPackageContainer(
+                    package: package,
+                    manifest: manifest.manifest,
+                    dependency: manifest.dependency,
+                    currentToolsVersion: self.currentToolsVersion
+                )
+                return completion(.success(container))
+            }
 
-            return completion(.success(container))
+            // Continue searching from the Workspace's root manifests.
+            if let rootPackage = self.dependencyManifests.root.packages[package.identity] {
+                let container = LocalPackageContainer(
+                    package: package,
+                    manifest: rootPackage.manifest,
+                    dependency: nil,
+                    currentToolsVersion: self.currentToolsVersion
+                )
+
+                return completion(.success(container))
+            }
+
+            // As we don't have anything else locally, error out.
+            completion(.failure(ResolverPrecomputationError.missingPackage(package: package)))
         }
-
-        // Continue searching from the Workspace's root manifests.
-        // FIXME: We might want to use a dictionary for faster lookups.
-        if let index = dependencyManifests.root.packageRefs.firstIndex(of: identifier) {
-            let container = LocalPackageContainer(
-                package: identifier,
-                manifest: dependencyManifests.root.manifests[index],
-                dependency: nil,
-                config: config,
-                currentToolsVersion: currentToolsVersion
-            )
-
-            return completion(.success(container))
-        }
-
-        // As we don't have anything else locally, error out.
-        completion(.failure(ResolverPrecomputationError.missingPackage(package: identifier)))
     }
 }
 
@@ -97,24 +92,9 @@ private struct LocalPackageContainer: PackageContainer {
     let manifest: Manifest
     /// The managed dependency if the package is not a root package.
     let dependency: ManagedDependency?
-    let config: SwiftPMConfig
     let currentToolsVersion: ToolsVersion
 
-    // Gets the package reference from the managed dependency or computes it for root packages.
-    var identifier: PackageReference {
-        if let identifier = dependency?.packageRef {
-            return identifier
-        } else {
-            let identity = PackageReference.computeIdentity(packageURL: manifest.url)
-            return PackageReference(
-                identity: identity,
-                path: manifest.path.pathString,
-                kind: .root
-            )
-        }
-    }
-
-    var reversedVersions: [Version] {
+    func versionsAscending() throws -> [Version] {
         if let version = dependency?.state.checkout?.version {
             return [version]
         } else {
@@ -130,15 +110,19 @@ private struct LocalPackageContainer: PackageContainer {
             return false
         }
     }
+    
+    func toolsVersion(for version: Version) throws -> ToolsVersion {
+        return currentToolsVersion
+    }
 
-    func versions(filter isIncluded: (Version) -> Bool) -> AnySequence<Version> {
-        return AnySequence(reversedVersions)
+    func toolsVersionsAppropriateVersionsDescending() throws -> [Version] {
+        return try self.versionsDescending()
     }
 
     func getDependencies(at version: Version, productFilter: ProductFilter) throws -> [PackageContainerConstraint] {
         // Because of the implementation of `reversedVersions`, we should only get the exact same version.
         precondition(dependency?.checkoutState?.version == version)
-        return manifest.dependencyConstraints(productFilter: productFilter, config: config)
+        return try manifest.dependencyConstraints(productFilter: productFilter)
     }
 
     func getDependencies(at revision: String, productFilter: ProductFilter) throws -> [PackageContainerConstraint] {
@@ -146,7 +130,7 @@ private struct LocalPackageContainer: PackageContainer {
         if let checkoutState = dependency?.checkoutState,
             checkoutState.version == nil,
             checkoutState.revision.identifier == revision {
-            return manifest.dependencyConstraints(productFilter: productFilter, config: config)
+            return try manifest.dependencyConstraints(productFilter: productFilter)
         }
 
         throw ResolverPrecomputationError.differentRequirement(
@@ -166,11 +150,16 @@ private struct LocalPackageContainer: PackageContainer {
             )
         }
 
-        return manifest.dependencyConstraints(productFilter: productFilter, config: config)
+        return try manifest.dependencyConstraints(productFilter: productFilter)
     }
 
+    // Gets the package reference from the managed dependency or computes it for root packages.
     func getUpdatedIdentifier(at boundVersion: BoundVersion) throws -> PackageReference {
-        return identifier
+        if let packageRef = dependency?.packageRef {
+            return packageRef
+        } else {
+            return .root(identity: self.package.identity, path: self.manifest.path)
+        }
     }
 }
 

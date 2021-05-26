@@ -17,29 +17,31 @@ import PackageLoading
 class ManifestLoadingPerfTests: XCTestCasePerf {
     let manifestLoader = ManifestLoader(manifestResources: Resources.default)
 
-    func write(_ bytes: ByteString, body: (AbsolutePath) -> ()) {
-        mktmpdir { path in
-            let manifestFile = path.appending(component: "Package.swift")
+    func write(_ bytes: ByteString, body: (AbsolutePath) -> ()) throws {
+        try testWithTemporaryDirectory { tmpdir in
+            let manifestFile = tmpdir.appending(component: "Package.swift")
             try localFileSystem.writeFileContents(manifestFile, bytes: bytes)
-            body(path)
+            body(tmpdir)
         }
     }
 
-    func testTrivialManifestLoading_X1() {
+    func testTrivialManifestLoading_X1() throws {
       #if os(macOS)
         let N = 1
         let trivialManifest = ByteString(encodingAsUTF8: ("""
             import PackageDescription
             let package = Package(name: "Trivial")
             """))
-        write(trivialManifest) { path in
+        try write(trivialManifest) { path in
             measure {
                 for _ in 0..<N {
                     let manifest = try! self.manifestLoader.load(
-                        package: path,
-                        baseURL: "/Trivial",
+                        at: path,
+                        packageKind: .root,
+                        packageLocation: "/Trivial",
                         toolsVersion: .v4_2,
-                        packageKind: .root)
+                        fileSystem: localFileSystem
+                    )
                     XCTAssertEqual(manifest.name, "Trivial")
                 }
             }
@@ -47,7 +49,7 @@ class ManifestLoadingPerfTests: XCTestCasePerf {
       #endif
     }
 
-    func testNonTrivialManifestLoading_X1() {
+    func testNonTrivialManifestLoading_X1() throws {
       #if os(macOS)
         let N = 1
         let manifest = ByteString(encodingAsUTF8: """
@@ -64,14 +66,16 @@ class ManifestLoadingPerfTests: XCTestCasePerf {
             )
             """)
 
-        write(manifest) { path in
+        try write(manifest) { path in
             measure {
                 for _ in 0..<N {
                     let manifest = try! self.manifestLoader.load(
-                        package: path,
-                        baseURL: "/Trivial",
+                        at: path,
+                        packageKind: .root,
+                        packageLocation: "/Trivial",
                         toolsVersion: .v4_2,
-                        packageKind: .root)
+                        fileSystem: localFileSystem
+                    )
                     XCTAssertEqual(manifest.name, "Foo")
                 }
             }

@@ -48,7 +48,7 @@ public final class PackageEditor {
         // FIXME: We need to handle version-specific manifests.
         let loadedManifest = try context.loadManifest(at: options.manifestPath.parentDirectory)
         let containsDependency = loadedManifest.dependencies.contains {
-            return PackageReference.computeIdentity(packageURL: options.url) == PackageReference.computeIdentity(packageURL: $0.url)
+            return PackageIdentity(options.url) == PackageIdentity($0.url)
         }
         guard !containsDependency else {
             throw StringError("Already has dependency \(options.url)")
@@ -71,7 +71,7 @@ public final class PackageEditor {
         } else {
             // Otherwise, first lookup the dependency.
             let spec = RepositorySpecifier(url: options.url)
-            let handle = try await{ context.repositoryManager.lookup(repository: spec, completion: $0) }
+            let handle = try temp_await{ context.repositoryManager.lookup(repository: spec, completion: $0) }
             let repo = try handle.open()
 
             // Compute the requirement.

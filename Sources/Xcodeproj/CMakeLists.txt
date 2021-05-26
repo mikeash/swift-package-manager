@@ -16,12 +16,13 @@ add_library(Xcodeproj
   XcodeProjectModelSerialization.swift)
 target_link_libraries(Xcodeproj PUBLIC
   TSCBasic
+  Basics
   PackageGraph)
 # NOTE(compnerd) workaround for CMake not setting up include flags yet
 set_target_properties(Xcodeproj PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_Swift_MODULE_DIRECTORY})
 
-if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+if(USE_CMAKE_INSTALL)
 install(TARGETS Xcodeproj
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib

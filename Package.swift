@@ -3,7 +3,7 @@
 /*
  This source file is part of the Swift.org open source project
 
- Copyright (c) 2014 - 2019 Apple Inc. and the Swift project authors
+ Copyright (c) 2014 - 2021 Apple Inc. and the Swift project authors
  Licensed under Apache License v2.0 with Runtime Library Exception
 
  See http://swift.org/LICENSE.txt for license information
@@ -20,7 +20,7 @@ let macOSPlatform: SupportedPlatform
 if let deploymentTarget = ProcessInfo.processInfo.environment["SWIFTPM_MACOS_DEPLOYMENT_TARGET"] {
     macOSPlatform = .macOS(deploymentTarget)
 } else {
-    macOSPlatform = .macOS(.v10_10)
+    macOSPlatform = .macOS(.v10_15)
 }
 
 let package = Package(
@@ -28,7 +28,8 @@ let package = Package(
     platforms: [macOSPlatform],
     products: [
         // The `libSwiftPM` set of interfaces to programatically work with Swift
-        // packages.
+        // packages.  `libSwiftPM` includes all of the SwiftPM code except the
+        // command line tools, while `libSwiftPMDataModel` includes only the data model.
         //
         // NOTE: This API is *unstable* and may change at any time.
         .library(
@@ -37,6 +38,8 @@ let package = Package(
             targets: [
                 "SourceControl",
                 "SPMLLBuild",
+                "PackageCollections",
+                "PackageCollectionsModel",
                 "LLBuildManifest",
                 "PackageModel",
                 "PackageLoading",
@@ -52,10 +55,26 @@ let package = Package(
                 "SourceControl",
                 "SPMLLBuild",
                 "LLBuildManifest",
+                "PackageCollections",
+                "PackageCollectionsModel",
                 "PackageModel",
                 "PackageLoading",
                 "PackageGraph",
                 "Build",
+                "Xcodeproj",
+                "Workspace"
+            ]
+        ),
+        .library(
+            name: "SwiftPMDataModel",
+            type: .dynamic,
+            targets: [
+                "SourceControl",
+                "PackageCollections",
+                "PackageCollectionsModel",
+                "PackageModel",
+                "PackageLoading",
+                "PackageGraph",
                 "Xcodeproj",
                 "Workspace"
             ]
@@ -71,63 +90,121 @@ let package = Package(
             type: .dynamic,
             targets: ["PackageDescription"]
         ),
+        
+        .library(
+            name: "PackagePlugin",
+            type: .dynamic,
+            targets: ["PackagePlugin"]
+        ),
+        
+        .library(
+            name: "PackageCollectionsModel",
+            targets: ["PackageCollectionsModel"]
+        ),
+
+        .library(
+            name: "SwiftPMPackageCollections",
+            targets: [
+                "PackageCollections",
+                "PackageCollectionsModel",
+                "PackageCollectionsSigning",
+                "PackageModel",
+            ]
+        ),
     ],
     targets: [
-        // The `PackageDescription` targets define the API which is available to
-        // the `Package.swift` manifest files. We build the latest API version
-        // here which is used when building and running swiftpm without the
-        // bootstrap script.
+        // The `PackageDescription` target provides the API that is available
+        // to `Package.swift` manifests. Here we build a debug version of the
+        // library; the bootstrap scripts build the deployable version.
         .target(
-            /** Package Definition API */
             name: "PackageDescription",
             swiftSettings: [
-                .define("PACKAGE_DESCRIPTION_4_2"),
+                .unsafeFlags(["-package-description-version", "999.0"]),
+                .unsafeFlags(["-enable-library-evolution"])
+            ]),
+
+        // The `PackagePlugin` target provides the API that is available to
+        // plugin scripts. Here we build a debug version of the library; the
+        // bootstrap scripts build the deployable version.
+        .target(
+            name: "PackagePlugin",
+            swiftSettings: [
+                .unsafeFlags(["-package-description-version", "999.0"]),
+                .unsafeFlags(["-enable-library-evolution"])
             ]),
 
         // MARK: SwiftPM specific support libraries
 
         .target(
+            name: "Basics",
+            dependencies: ["SwiftToolsSupport-auto"]),
+
+        .target(
             /** The llbuild manifest model */
             name: "LLBuildManifest",
-            dependencies: ["SwiftToolsSupport-auto"]),
+            dependencies: ["SwiftToolsSupport-auto", "Basics"]),
 
         .target(
             /** Source control operations */
             name: "SourceControl",
-            dependencies: ["SwiftToolsSupport-auto"]),
+            dependencies: ["SwiftToolsSupport-auto", "Basics"]),
         .target(
             /** Shim for llbuild library */
             name: "SPMLLBuild",
-            dependencies: ["SwiftToolsSupport-auto"]),
+            dependencies: ["SwiftToolsSupport-auto", "Basics"]),
 
         // MARK: Project Model
 
         .target(
             /** Primitive Package model objects */
             name: "PackageModel",
-            dependencies: ["SwiftToolsSupport-auto"]),
+            dependencies: ["SwiftToolsSupport-auto", "Basics"]),
         .target(
             /** Package model conventions and loading support */
             name: "PackageLoading",
-            dependencies: ["SwiftToolsSupport-auto", "PackageModel", "SPMLLBuild"]),
+            dependencies: ["SwiftToolsSupport-auto", "Basics", "PackageModel", "SourceControl"]),
 
         // MARK: Package Dependency Resolution
 
         .target(
             /** Data structures and support for complete package graphs */
             name: "PackageGraph",
-            dependencies: ["SwiftToolsSupport-auto", "PackageLoading", "PackageModel", "SourceControl"]),
+            dependencies: ["SwiftToolsSupport-auto", "Basics", "PackageLoading", "PackageModel", "SourceControl"]),
+
+        // MARK: Package Collections
+        
+        .target(
+            /** Package collections models */
+            name: "PackageCollectionsModel",
+            dependencies: []),
+
+        .target(
+            /** Package collections signing C lib */
+            name: "PackageCollectionsSigningLibc",
+            dependencies: ["Crypto"],
+            cSettings: [
+                .define("WIN32_LEAN_AND_MEAN"),
+            ]),
+        .target(
+             /** Package collections signing */
+             name: "PackageCollectionsSigning",
+             dependencies: ["PackageCollectionsModel", "PackageCollectionsSigningLibc", "Crypto", "Basics"]),
+
+        .target(
+            /** Data structures and support for package collections */
+            name: "PackageCollections",
+            dependencies: ["SwiftToolsSupport-auto", "Basics", "PackageModel", "SourceControl", "PackageCollectionsModel", "PackageCollectionsSigning"]),
 
         // MARK: Package Manager Functionality
 
         .target(
             /** Builds Modules and Products */
             name: "SPMBuildCore",
-            dependencies: ["SwiftToolsSupport-auto", "PackageGraph"]),
+            dependencies: ["SwiftToolsSupport-auto", "Basics", "PackageGraph"]),
         .target(
             /** Builds Modules and Products */
             name: "Build",
-            dependencies: ["SwiftToolsSupport-auto", "SPMBuildCore", "PackageGraph", "LLBuildManifest", "SwiftDriver"]),
+            dependencies: ["SwiftToolsSupport-auto", "Basics", "SPMBuildCore", "PackageGraph", "LLBuildManifest", "SwiftDriver", "SPMLLBuild"]),
         .target(
             /** Support for building using Xcode's build system */
             name: "XCBuildSupport",
@@ -136,22 +213,22 @@ let package = Package(
         .target(
             /** Generates Xcode projects */
             name: "Xcodeproj",
-            dependencies: ["SwiftToolsSupport-auto", "PackageGraph"]),
+            dependencies: ["SwiftToolsSupport-auto", "Basics", "PackageGraph"]),
         .target(
             /** High level functionality */
             name: "Workspace",
-            dependencies: ["SwiftToolsSupport-auto", "Build", "PackageGraph", "PackageModel", "SourceControl", "Xcodeproj"]),
+            dependencies: ["SwiftToolsSupport-auto", "Basics", "SPMBuildCore", "PackageGraph", "PackageModel", "SourceControl", "Xcodeproj"]),
 
         // MARK: Commands
 
         .target(
             /** High-level commands */
             name: "Commands",
-            dependencies: ["SwiftToolsSupport-auto", "Build", "PackageGraph", "SourceControl", "Xcodeproj", "Workspace", "XCBuildSupport"]),
+            dependencies: ["SwiftToolsSupport-auto", "Basics", "Build", "PackageGraph", "SourceControl", "Xcodeproj", "Workspace", "XCBuildSupport", "ArgumentParser", "PackageCollections"]),
         .target(
             /** The main executable provided by SwiftPM */
             name: "swift-package",
-            dependencies: ["Commands"]),
+            dependencies: ["Commands", "SwiftToolsSupport-auto"]),
         .target(
             /** Builds packages */
             name: "swift-build",
@@ -163,6 +240,10 @@ let package = Package(
         .target(
             /** Runs an executable product */
             name: "swift-run",
+            dependencies: ["Commands"]),
+        .target(
+            /** Interacts with package collections */
+            name: "swift-package-collection",
             dependencies: ["Commands"]),
         .target(
             /** Shim tool to find test names on OS X */
@@ -177,10 +258,13 @@ let package = Package(
         .target(
             /** SwiftPM test support library */
             name: "SPMTestSupport",
-            dependencies: ["SwiftToolsSupport-auto", "TSCTestSupport", "PackageGraph", "PackageLoading", "SourceControl", "Commands", "XCBuildSupport"]),
+            dependencies: ["SwiftToolsSupport-auto", "Basics", "Build", "TSCTestSupport", "PackageGraph", "PackageLoading", "SourceControl", "Workspace", "Xcodeproj", "XCBuildSupport"]),
 
         // MARK: SwiftPM tests
 
+        .testTarget(
+            name: "BasicsTests",
+            dependencies: ["Basics", "SPMTestSupport"]),
         .testTarget(
             name: "BuildTests",
             dependencies: ["Build", "SPMTestSupport"]),
@@ -200,6 +284,9 @@ let package = Package(
             name: "PackageDescription4Tests",
             dependencies: ["PackageDescription"]),
         .testTarget(
+            name: "SPMBuildCoreTests",
+            dependencies: ["SPMBuildCore", "SPMTestSupport"]),
+        .testTarget(
             name: "PackageLoadingTests",
             dependencies: ["PackageLoading", "SPMTestSupport"],
             exclude: ["Inputs"]),
@@ -215,6 +302,15 @@ let package = Package(
         .testTarget(
             name: "PackageGraphPerformanceTests",
             dependencies: ["PackageGraph", "SPMTestSupport"]),
+        .testTarget(
+            name: "PackageCollectionsModelTests",
+            dependencies: ["PackageCollectionsModel"]),
+        .testTarget(
+            name: "PackageCollectionsSigningTests",
+            dependencies: ["PackageCollectionsSigning", "SPMTestSupport"]),
+        .testTarget(
+            name: "PackageCollectionsTests",
+            dependencies: ["PackageCollections", "SPMTestSupport"]),
         .testTarget(
             name: "SourceControlTests",
             dependencies: ["SourceControl", "SPMTestSupport"]),
@@ -244,11 +340,13 @@ let package = Package(
 // package dependency like this but there is no other good way of expressing
 // this right now.
 
+/// When not using local dependencies, the branch to use for llbuild and TSC repositories.
+let relatedDependenciesBranch = "main"
 
 if ProcessInfo.processInfo.environment["SWIFTPM_LLBUILD_FWK"] == nil {
     if ProcessInfo.processInfo.environment["SWIFTCI_USE_LOCAL_DEPS"] == nil {
         package.dependencies += [
-            .package(url: "https://github.com/apple/swift-llbuild.git", .branch("master")),
+            .package(url: "https://github.com/apple/swift-llbuild.git", .branch(relatedDependenciesBranch)),
         ]
     } else {
         // In Swift CI, use a local path to llbuild to interoperate with tools
@@ -262,12 +360,19 @@ if ProcessInfo.processInfo.environment["SWIFTPM_LLBUILD_FWK"] == nil {
 
 if ProcessInfo.processInfo.environment["SWIFTCI_USE_LOCAL_DEPS"] == nil {
     package.dependencies += [
-        .package(url: "https://github.com/apple/swift-tools-support-core.git", .branch("master")),
-        .package(url: "https://github.com/apple/swift-driver.git", .branch("master")),
+        .package(url: "https://github.com/apple/swift-tools-support-core.git", .branch(relatedDependenciesBranch)),
+        // The 'swift-argument-parser' version declared here must match that
+        // used by 'swift-driver' and 'sourcekit-lsp'. Please coordinate
+        // dependency version changes here with those projects.
+        .package(url: "https://github.com/apple/swift-argument-parser.git", .upToNextMinor(from: "0.4.3")),
+        .package(url: "https://github.com/apple/swift-driver.git", .branch(relatedDependenciesBranch)),
+        .package(url: "https://github.com/apple/swift-crypto.git", .upToNextMinor(from: "1.1.4")),
     ]
 } else {
     package.dependencies += [
-        .package(path: "./swift-tools-support-core"),
+        .package(path: "../swift-tools-support-core"),
+        .package(path: "../swift-argument-parser"),
         .package(path: "../swift-driver"),
+        .package(path: "../swift-crypto"),
     ]
 }

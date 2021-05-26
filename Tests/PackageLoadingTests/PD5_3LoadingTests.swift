@@ -16,7 +16,7 @@ import SPMTestSupport
 import PackageModel
 import PackageLoading
 
-class PackageDescriptionNextLoadingTests: PackageDescriptionLoadingTests {
+class PackageDescription5_3LoadingTests: PackageDescriptionLoadingTests {
     override var toolsVersion: ToolsVersion {
         .v5_3
     }
@@ -85,7 +85,7 @@ class PackageDescriptionNextLoadingTests: PackageDescriptionLoadingTests {
             let targets = Dictionary(uniqueKeysWithValues: manifest.targets.map({ ($0.name, $0) }))
             let foo1 = targets["Foo1"]!
             let foo2 = targets["Foo2"]!
-            XCTAssertEqual(foo1, TargetDescription(
+            XCTAssertEqual(foo1, try? TargetDescription(
                 name: "Foo1",
                 dependencies: [],
                 path: "../Foo1.xcframework",
@@ -99,7 +99,7 @@ class PackageDescriptionNextLoadingTests: PackageDescriptionLoadingTests {
                 providers: nil,
                 settings: [],
                 checksum: nil))
-            XCTAssertEqual(foo2, TargetDescription(
+            XCTAssertEqual(foo2, try? TargetDescription(
                 name: "Foo2",
                 dependencies: [],
                 path: nil,
@@ -113,6 +113,24 @@ class PackageDescriptionNextLoadingTests: PackageDescriptionLoadingTests {
                 providers: nil,
                 settings: [],
                 checksum: "839F9F30DC13C30795666DD8F6FB77DD0E097B83D06954073E34FE5154481F7A"))
+        }
+    }
+    
+    func testBinaryTargetsDisallowedProperties() throws {
+        let stream = BufferedOutputByteStream()
+        stream <<< """
+            import PackageDescription
+            var fwBinaryTarget = Target.binaryTarget(
+                name: "Foo",
+                url: "https://example.com/foo.git",
+                checksum: "xyz"
+            )
+            fwBinaryTarget.linkerSettings = [ .linkedFramework("AVFoundation") ]
+            let package = Package(name: "foo", targets: [fwBinaryTarget])
+            """
+        
+        XCTAssertManifestLoadThrows(stream.bytes) { error, _ in
+            XCTAssertEqual(error.localizedDescription, "target 'Foo' contains a value for disallowed property 'settings'")
         }
     }
 
@@ -212,7 +230,7 @@ class PackageDescriptionNextLoadingTests: PackageDescriptionLoadingTests {
                 """
 
             XCTAssertManifestLoadThrows(stream.bytes) { _, diagnostics in
-                diagnostics.check(diagnostic: "invalid URL scheme for binary target 'Foo'; valid schemes are: https", behavior: .error)
+                diagnostics.check(diagnostic: "invalid URL scheme for binary target 'Foo'; valid schemes are: 'https'", behavior: .error)
             }
         }
 
@@ -232,7 +250,7 @@ class PackageDescriptionNextLoadingTests: PackageDescriptionLoadingTests {
                 """
 
             XCTAssertManifestLoadThrows(stream.bytes) { _, diagnostics in
-                diagnostics.check(diagnostic: "unsupported extension for binary target 'Foo'; valid extensions are: xcframework", behavior: .error)
+                diagnostics.check(diagnostic: "unsupported extension for binary target 'Foo'; valid extensions are: 'xcframework', 'artifactbundle'", behavior: .error)
             }
         }
 
@@ -255,7 +273,7 @@ class PackageDescriptionNextLoadingTests: PackageDescriptionLoadingTests {
                 """
 
             XCTAssertManifestLoadThrows(stream.bytes) { _, diagnostics in
-                diagnostics.check(diagnostic: "unsupported extension for binary target 'Foo'; valid extensions are: zip", behavior: .error)
+                diagnostics.check(diagnostic: "unsupported extension for binary target 'Foo'; valid extensions are: 'zip'", behavior: .error)
             }
         }
 
@@ -275,7 +293,7 @@ class PackageDescriptionNextLoadingTests: PackageDescriptionLoadingTests {
                 """
 
             XCTAssertManifestLoadThrows(stream.bytes) { _, diagnostics in
-                diagnostics.check(diagnostic: "unsupported extension for binary target 'Foo'; valid extensions are: xcframework", behavior: .error)
+                diagnostics.check(diagnostic: "unsupported extension for binary target 'Foo'; valid extensions are: 'xcframework', 'artifactbundle'", behavior: .error)
             }
         }
 
@@ -298,7 +316,7 @@ class PackageDescriptionNextLoadingTests: PackageDescriptionLoadingTests {
                 """
 
             XCTAssertManifestLoadThrows(stream.bytes) { _, diagnostics in
-                diagnostics.check(diagnostic: "unsupported extension for binary target 'Foo'; valid extensions are: zip", behavior: .error)
+                diagnostics.check(diagnostic: "unsupported extension for binary target 'Foo'; valid extensions are: 'zip'", behavior: .error)
             }
         }
     }
@@ -405,5 +423,29 @@ class PackageDescriptionNextLoadingTests: PackageDescriptionLoadingTests {
         XCTAssertManifestLoadThrows(stream.bytes) { error, _ in
             XCTAssertTrue(error is ManifestParseError, "unexpected error: \(error)")
         }
+    }
+
+    func testManifestLoadingIsSandboxed() throws {
+        #if os(macOS) // Sandboxing is only done on macOS today.
+        let stream = BufferedOutputByteStream()
+        stream <<< """
+            import Foundation
+
+            try! "should not be allowed".write(to: URL(fileURLWithPath: "/tmp/file.txt"), atomically: true, encoding: String.Encoding.utf8)
+
+            import PackageDescription
+            let package = Package(
+                name: "Foo",
+                targets: [
+                    .target(name: "Foo"),
+                ]
+            )
+            """
+
+        XCTAssertManifestLoadThrows(stream.bytes) { error, _ in
+            guard case ManifestParseError.invalidManifestFormat(let msg, _) = error else { return XCTFail("unexpected error: \(error)") }
+            XCTAssertTrue(msg.contains("Operation not permitted"), "unexpected error message: \(msg)")
+        }
+        #endif
     }
 }

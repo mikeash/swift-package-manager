@@ -1,7 +1,7 @@
 /*
  This source file is part of the Swift.org open source project
 
- Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+ Copyright (c) 2014 - 2020 Apple Inc. and the Swift project authors
  Licensed under Apache License v2.0 with Runtime Library Exception
 
  See http://swift.org/LICENSE.txt for license information
@@ -11,7 +11,7 @@
 import TSCBasic
 
 /// Specifies a repository address.
-public struct RepositorySpecifier: Hashable {
+public struct RepositorySpecifier: Hashable, Codable {
     /// The URL of the repository.
     public let url: String
 
@@ -26,15 +26,14 @@ public struct RepositorySpecifier: Hashable {
     /// unique for each repository.
     public var fileSystemIdentifier: String {
         // Use first 8 chars of a stable hash.
-        let hash = SHA256().hash(url).hexadecimalRepresentation
-        let suffix = hash.dropLast(hash.count - 8)
+        let suffix = ByteString(encodingAsUTF8: url).sha256Checksum.prefix(8)
 
-        return basename + "-" + suffix
+        return "\(basename)-\(suffix)"
     }
 
     /// Returns the cleaned basename for the specifier.
     public var basename: String {
-        var basename = url.components(separatedBy: "/").last!
+        var basename = url.components(separatedBy: "/").last(where: { !$0.isEmpty }) ?? ""
         if basename.hasSuffix(".git") {
             basename = String(basename.dropLast(4))
         }
@@ -69,49 +68,61 @@ extension RepositorySpecifier: JSONMappable, JSONSerializable {
 public protocol RepositoryProvider {
     /// Fetch the complete repository at the given location to `path`.
     ///
-    /// - Throws: If there is an error fetching the repository.
+    /// - Parameters:
+    ///   - repository: The specifier of the repository to fetch.
+    ///   - path: The destination path for the fetch.
+    /// - Throws: If there is any error fetching the repository.
     func fetch(repository: RepositorySpecifier, to path: AbsolutePath) throws
 
     /// Open the given repository.
     ///
     /// - Parameters:
-    ///   - repository: The specifier for the repository.
+    ///   - repository: The specifier of the original repository from which the
+    ///     local clone repository was created.
     ///   - path: The location of the repository on disk, at which the
     ///     repository has previously been created via `fetch`.
+    ///
     /// - Throws: If the repository is unable to be opened.
     func open(repository: RepositorySpecifier, at path: AbsolutePath) throws -> Repository
 
-    /// Clone a managed repository into a working copy at on the local file system.
+    /// Create a working copy from a managed repository.
     ///
-    /// Once complete, the repository can be opened using `openCheckout`.
+    /// Once complete, the repository can be opened using `openWorkingCopy`. Note
+    /// that there is no requirement that the files have been materialized into
+    /// the file system at the completion of this call, since it will always be
+    /// followed by checking out the cloned working copy at a particular ref.
     ///
     /// - Parameters:
+    ///   - repository: The specifier of the original repository from which the
+    ///     local clone repository was created.
     ///   - sourcePath: The location of the repository on disk, at which the
     ///     repository has previously been created via `fetch`.
     ///   - destinationPath: The path at which to create the working copy; it is
     ///     expected to be non-existent when called.
     ///   - editable: The checkout is expected to be edited by users.
-    func cloneCheckout(
+    ///
+    /// - Throws: If there is any error cloning the repository.
+    func createWorkingCopy(
         repository: RepositorySpecifier,
-        at sourcePath: AbsolutePath,
-        to destinationPath: AbsolutePath,
-        editable: Bool) throws
+        sourcePath: AbsolutePath,
+        at destinationPath: AbsolutePath,
+        editable: Bool) throws -> WorkingCheckout
 
     /// Returns true if a working repository exists at `path`
-    func checkoutExists(at path: AbsolutePath) throws -> Bool
+    func workingCopyExists(at path: AbsolutePath) throws -> Bool
 
     /// Open a working repository copy.
     ///
     /// - Parameters:
-    ///   - path: The location of the repository on disk, at which the
-    ///     repository has previously been created via `cloneCheckout`.
-    func openCheckout(at path: AbsolutePath) throws -> WorkingCheckout
-}
+    ///   - path: The location of the repository on disk, at which the repository
+    ///     has previously been created via `copyToWorkingDirectory`.
+    func openWorkingCopy(at path: AbsolutePath) throws -> WorkingCheckout
 
-extension RepositoryProvider {
-    public func checkoutExists(at path: AbsolutePath) throws -> Bool {
-        fatalError("Unimplemented")
-    }
+    /// Copies the repository at path `from` to path `to`.
+    /// - Parameters:
+    ///   - sourcePath: the source path.
+    ///   - destinationPath: the destination  path.
+    func copy(from sourcePath: AbsolutePath, to destinationPath: AbsolutePath) throws
 }
 
 /// Abstract repository operations.
@@ -134,7 +145,7 @@ extension RepositoryProvider {
 /// an inconsistency can be detected.
 public protocol Repository {
     /// Get the list of tags in the repository.
-    var tags: [String] { get }
+    func getTags() throws -> [String]
 
     /// Resolve the revision for a specific tag.
     ///
@@ -170,15 +181,31 @@ public protocol Repository {
     /// It is expected behavior that attempts to mutate the given FileSystem
     /// will fail or crash.
     ///
-    /// - Throws: If a error occurs accessing the revision.
+    /// - Throws: If an error occurs accessing the revision.
     func openFileView(revision: Revision) throws -> FileSystem
+
+    /// Open an immutable file system view for a particular tag.
+    ///
+    /// This view exposes the contents of the repository at the given revision
+    /// as a file system rooted inside the repository. The repository must
+    /// support opening multiple views concurrently, but the expectation is that
+    /// clients should be prepared for this to be inefficient when performing
+    /// interleaved accesses across separate views (i.e., the repository may
+    /// back the view by an actual file system representation of the
+    /// repository).
+    ///
+    /// It is expected behavior that attempts to mutate the given FileSystem
+    /// will fail or crash.
+    ///
+    /// - Throws: If an error occurs accessing the revision.
+    func openFileView(tag: String) throws -> FileSystem
 }
 
 /// An editable checkout of a repository (i.e. a working copy) on the local file
 /// system.
 public protocol WorkingCheckout {
     /// Get the list of tags in the repository.
-    var tags: [String] { get }
+    func getTags() throws -> [String]
 
     /// Get the current revision.
     func getCurrentRevision() throws -> Revision
@@ -214,12 +241,6 @@ public protocol WorkingCheckout {
 
     /// Returns true if the file at `path` is ignored by `git`
     func areIgnored(_ paths: [AbsolutePath]) throws -> [Bool]
-}
-
-extension WorkingCheckout {
-    public func areIgnored(_ paths: [AbsolutePath]) throws -> [Bool] {
-        fatalError("Unimplemented")
-    }
 }
 
 /// A single repository revision.

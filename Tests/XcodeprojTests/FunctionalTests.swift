@@ -11,7 +11,6 @@
 import XCTest
 
 import TSCBasic
-import Commands
 import SPMTestSupport
 import PackageModel
 import TSCUtility
@@ -168,6 +167,7 @@ func XCTAssertXcodeBuild(project: AbsolutePath, file: StaticString = #file, line
               "-scheme", scheme,
               "-xcconfig", xcconfig.pathString,
               "-derivedDataPath", buildDir.pathString,
+              "-destination", "platform=macOS",
               "COMPILER_INDEX_STORE_ENABLE=NO",
             environment: env)
     } catch {

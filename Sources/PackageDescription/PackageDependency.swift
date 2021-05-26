@@ -64,7 +64,41 @@ extension Package.Dependency {
     ) -> Package.Dependency {
         return .init(name: name, url: url, requirement: .upToNextMajor(from: version))
     }
-
+    
+    /// Adds a remote package dependency given a branch requirement.
+    ///
+    ///    .package(url: "https://example.com/example-package.git", branch: "main"),
+    ///
+    /// - Parameters:
+    ///     - name: The name of the package, or nil to deduce it from the URL.
+    ///     - url: The valid Git URL of the package.
+    ///     - branch: A dependency requirement. See static methods on `Package.Dependency.Requirement` for available options.
+    @available(_PackageDescription, introduced: 5.5)
+    public static func package(
+        name: String? = nil,
+        url: String,
+        branch: String
+    ) -> Package.Dependency {
+        return .init(name: name, url: url, requirement: .branch(branch))
+    }
+  
+    /// Adds a remote package dependency given a revision requirement.
+    ///
+    ///    .package(url: "https://example.com/example-package.git", revision: "aa681bd6c61e22df0fd808044a886fc4a7ed3a65"),
+    ///
+    /// - Parameters:
+    ///     - name: The name of the package, or nil to deduce it from the URL.
+    ///     - url: The valid Git URL of the package.
+    ///     - revision: A dependency requirement. See static methods on `Package.Dependency.Requirement` for available options.
+    @available(_PackageDescription, introduced: 5.5)
+    public static func package(
+        name: String? = nil,
+        url: String,
+        revision: String
+    ) -> Package.Dependency {
+        return .init(name: name, url: url, requirement: .revision(revision))
+    }
+  
     /// Adds a remote package dependency given a version requirement.
     ///
     /// - Parameters:
@@ -113,11 +147,7 @@ extension Package.Dependency {
         url: String,
         _ range: Range<Version>
     ) -> Package.Dependency {
-      #if PACKAGE_DESCRIPTION_4
         return .init(name: nil, url: url, requirement: .rangeItem(range))
-      #else
-        return .init(name: nil, url: url, requirement: ._rangeItem(range))
-      #endif
     }
 
     /// Adds a package dependency starting with a specific minimum version, up to
@@ -138,11 +168,7 @@ extension Package.Dependency {
         url: String,
         _ range: Range<Version>
     ) -> Package.Dependency {
-      #if PACKAGE_DESCRIPTION_4
         return .init(name: name, url: url, requirement: .rangeItem(range))
-      #else
-        return .init(name: name, url: url, requirement: ._rangeItem(range))
-      #endif
     }
 
     /// Adds a package dependency starting with a specific minimum version, going
@@ -168,11 +194,7 @@ extension Package.Dependency {
             upper.major, upper.minor, upper.patch + 1,
             prereleaseIdentifiers: upper.prereleaseIdentifiers,
             buildMetadataIdentifiers: upper.buildMetadataIdentifiers)
-      #if PACKAGE_DESCRIPTION_4
         return .init(name: nil, url: url, requirement: .rangeItem(range.lowerBound..<upperBound))
-      #else
-        return .init(name: nil, url: url, requirement: ._rangeItem(range.lowerBound..<upperBound))
-      #endif
     }
 
     /// Adds a package dependency starting with a specific minimum version, going
@@ -199,14 +221,9 @@ extension Package.Dependency {
             upper.major, upper.minor, upper.patch + 1,
             prereleaseIdentifiers: upper.prereleaseIdentifiers,
             buildMetadataIdentifiers: upper.buildMetadataIdentifiers)
-      #if PACKAGE_DESCRIPTION_4
         return .init(name: name, url: url, requirement: .rangeItem(range.lowerBound..<upperBound))
-      #else
-        return .init(name: name, url: url, requirement: ._rangeItem(range.lowerBound..<upperBound))
-      #endif
     }
 
-  #if !PACKAGE_DESCRIPTION_4
     /// Adds a package dependency to a local package on the filesystem.
     ///
     /// The Swift Package Manager uses the package dependency as-is
@@ -219,7 +236,7 @@ extension Package.Dependency {
     public static func package(
         path: String
     ) -> Package.Dependency {
-        return .init(name: nil, url: path, requirement: ._localPackageItem)
+        return .init(name: nil, url: path, requirement: .localPackageItem)
     }
 
     /// Adds a package dependency to a local package on the filesystem.
@@ -237,25 +254,14 @@ extension Package.Dependency {
         name: String? = nil,
         path: String
     ) -> Package.Dependency {
-        return .init(name: name, url: path, requirement: ._localPackageItem)
+        return .init(name: name, url: path, requirement: .localPackageItem)
     }
-  #endif
 }
 
 // Mark common APIs used by mistake as unavailable to provide better error messages.
 extension Package.Dependency {
     @available(*, unavailable, message: "use package(url:_:) with the .exact(Version) initializer instead")
     public static func package(url: String, version: Version) -> Package.Dependency {
-        fatalError()
-    }
-
-    @available(*, unavailable, message: "use package(url:_:) with the .branch(String) initializer instead")
-    public static func package(url: String, branch: String) -> Package.Dependency {
-        fatalError()
-    }
-
-    @available(*, unavailable, message: "use package(url:_:) with the .revision(String) initializer instead")
-    public static func package(url: String, revision: String) -> Package.Dependency {
         fatalError()
     }
 

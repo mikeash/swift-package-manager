@@ -1,13 +1,14 @@
 /*
  This source file is part of the Swift.org open source project
 
- Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+ Copyright (c) 2014 - 2021 Apple Inc. and the Swift project authors
  Licensed under Apache License v2.0 with Runtime Library Exception
 
  See http://swift.org/LICENSE.txt for license information
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 */
 
+import Basics
 import TSCBasic
 import PackageGraph
 import PackageModel
@@ -72,15 +73,15 @@ public func xcodeProject(
         guard let manifestLoader = options.manifestLoader else { return }
 
         let pdTarget = project.addTarget(
-            objectID: "\(package.name)::SwiftPMPackageDescription",
-            productType: .framework, name: "\(package.name)PackageDescription")
+            objectID: "\(package.manifestName)::SwiftPMPackageDescription", // TODO: use identity instead?
+            productType: .framework, name: "\(package.manifestName)PackageDescription") // TODO: use identity instead?
         let compilePhase = pdTarget.addSourcesBuildPhase()
         compilePhase.addBuildFile(fileRef: manifestFileRef)
 
         var interpreterFlags = manifestLoader.interpreterFlags(for: package.manifest.toolsVersion)
         if !interpreterFlags.isEmpty {
             // Patch the interpreter flags to use Xcode supported toolchain macro instead of the resolved path.
-            interpreterFlags[3] = "$(TOOLCHAIN_DIR)/usr/lib/swift/pm/\(package.manifest.toolsVersion.runtimeSubpath.pathString)"
+            interpreterFlags[3] = "$(TOOLCHAIN_DIR)/usr/lib/swift/pm/ManifestAPI"
         }
         pdTarget.buildSettings.common.OTHER_SWIFT_FLAGS += interpreterFlags
         pdTarget.buildSettings.common.SWIFT_VERSION = package.manifest.toolsVersion.swiftLanguageVersion.xcodeBuildSettingValue
@@ -108,15 +109,8 @@ public func xcodeProject(
     // Set the SUPPORTED_PLATFORMS to all platforms.
     // FIXME: This doesn't seem correct, but was what the old project generation
     // code did, so for now we do so too.
-    projectSettings.common.SUPPORTED_PLATFORMS = [
-        "macosx",
-        "iphoneos",
-        "iphonesimulator",
-        "appletvos",
-        "appletvsimulator",
-        "watchos",
-        "watchsimulator",
-    ]
+    projectSettings.common.SUPPORTED_PLATFORMS = ["$(AVAILABLE_PLATFORMS)"]
+    projectSettings.common.SUPPORTS_MACCATALYST = "YES"
 
     // Set the default `SDKROOT` to the latest macOS SDK.
     projectSettings.common.SDKROOT = "macosx"
@@ -340,8 +334,9 @@ public func xcodeProject(
             if targetSet.intersection(package.targets).isEmpty {
                 continue
             }
+            // TODO: use identity instead
             // Construct a group name from the package name and optional version.
-            var groupName = package.name
+            var groupName = package.manifestName // TODO: use identity instead?
             if let version = package.manifest.version {
                 groupName += " " + version.description
             }
@@ -385,7 +380,7 @@ public func xcodeProject(
     // Go through all the targets, creating targets and adding file references
     // to the group tree (the specific top-level group under which they are
     // added depends on whether or not the target is a test target).
-    for target in targets {
+    for target in targets.sorted(by: { $0.name < $1.name }) {
         // Determine the appropriate product type based on the kind of target.
         // FIXME: We should factor this out.
         let productType: Xcode.Target.ProductType
@@ -396,8 +391,8 @@ public func xcodeProject(
             productType = .framework
         case .test:
             productType = .unitTest
-        case .systemModule, .binary:
-            fatalError()
+        case .systemModule, .binary, .plugin:
+            throw InternalError("\(target.type) not supported")
         }
 
         // Warn if the target name is invalid.
@@ -410,7 +405,7 @@ public func xcodeProject(
         // Create a Xcode target for the target.
         let package = packagesByTarget[target]!
         let xcodeTarget = project.addTarget(
-            objectID: "\(package.name)::\(target.name)",
+            objectID: "\(package.manifestName)::\(target.name)", // TODO: use identity instead?
             productType: productType, name: target.name)
 
         // Set the product name to the C99-mangled form of the target name.
@@ -440,6 +435,8 @@ public func xcodeProject(
                     targetSettings.common.TVOS_DEPLOYMENT_TARGET = version
                 case .watchOS:
                     targetSettings.common.WATCHOS_DEPLOYMENT_TARGET = version
+                case .driverKit:
+                    targetSettings.common.DRIVERKIT_DEPLOYMENT_TARGET = version
                 default:
                     break
                 }
@@ -448,6 +445,11 @@ public func xcodeProject(
 
         let infoPlistFilePath = xcodeprojPath.appending(component: target.infoPlistFileName)
         targetSettings.common.INFOPLIST_FILE = infoPlistFilePath.relative(to: sourceRootDir).pathString
+        // The generated Info.plist has $(CURRENT_PROJECT_VERSION) as value for the CFBundleVersion key.
+        // CFBundleVersion is required for apps to e.g. be submitted to the app store.
+        // So we need to set it to some valid value in the project settings.
+        // TODO: Extract version from SPM target (see SR-4265 and SR-12926).
+        targetSettings.common.CURRENT_PROJECT_VERSION = "1"
 
         if target.type == .test {
             targetSettings.common.CLANG_ENABLE_MODULES = "YES"
@@ -490,7 +492,7 @@ public func xcodeProject(
 
         // Add header search paths for any C target on which we depend.
         var hdrInclPaths = ["$(inherited)"]
-        for depModule in [target] + target.recursiveTargetDependencies() {
+        for depModule in try [target] + target.recursiveTargetDependencies() {
             // FIXME: Possibly factor this out into a separate protocol; the
             // idea would be that we would ask the target how it contributes
             // to the overall build environment for client targets, which can
@@ -502,7 +504,7 @@ public func xcodeProject(
             switch depModule.underlyingTarget {
               case let systemTarget as SystemLibraryTarget:
                 hdrInclPaths.append("$(SRCROOT)/\(systemTarget.path.relative(to: sourceRootDir).pathString)")
-                if let pkgArgs = pkgConfigArgs(for: systemTarget, diagnostics: diagnostics) {
+                for pkgArgs in pkgConfigArgs(for: systemTarget, diagnostics: diagnostics) {
                     targetSettings.common.OTHER_LDFLAGS += pkgArgs.libs
                     targetSettings.common.OTHER_SWIFT_FLAGS += pkgArgs.cFlags
                     targetSettings.common.OTHER_CFLAGS += pkgArgs.cFlags
@@ -518,8 +520,9 @@ public func xcodeProject(
         // Add framework search path to build settings.
         targetSettings.common.FRAMEWORK_SEARCH_PATHS = ["$(inherited)", "$(PLATFORM_DIR)/Developer/Library/Frameworks"]
 
+        // TODO: use identity instead
         // Add a file reference for the target's product.
-        let productRef = productsGroup.addFileReference(path: target.productPath.pathString, pathBase: .buildDir, objectID: "\(package.name)::\(target.name)::Product")
+        let productRef = productsGroup.addFileReference(path: target.productPath.pathString, pathBase: .buildDir, objectID: "\(package.manifestName)::\(target.name)::Product")
 
         // Set that file reference as the target's product reference.
         xcodeTarget.productReference = productRef
@@ -583,8 +586,8 @@ public func xcodeProject(
             var isGenerated = false
 
             // If user provided the modulemap no need to generate.
-            if fileSystem.isFile(clangTarget.moduleMapPath) {
-                moduleMapPath = clangTarget.moduleMapPath
+            if case .custom(let path) = clangTarget.moduleMapType {
+                moduleMapPath = path
             } else if includeGroup.subitems.contains(where: { $0.path == clangTarget.c99name + ".h" }) {
                 // If an umbrella header exists, enable Xcode's builtin module's feature rather than generating
                 // a custom module map. This increases the compatibility of generated Xcode projects.
@@ -595,12 +598,13 @@ public func xcodeProject(
                 }
                 targetSettings.common.CLANG_ENABLE_MODULES = "YES"
                 targetSettings.common.DEFINES_MODULE = "YES"
-            } else {
-                // Generate and drop the modulemap inside Xcodeproj folder.
-                let path = xcodeprojPath.appending(components: "GeneratedModuleMap", clangTarget.c99name)
-                var moduleMapGenerator = ModuleMapGenerator(for: clangTarget, fileSystem: fileSystem)
-                try moduleMapGenerator.generateModuleMap(inDir: path)
-                moduleMapPath = path.appending(component: moduleMapFilename)
+            } else if let generatedModuleMapType = clangTarget.moduleMapType.generatedModuleMapType {
+                // Generate and drop the modulemap inside the .xcodeproj wrapper.
+                let path = xcodeprojPath.appending(components: "GeneratedModuleMap", clangTarget.c99name, moduleMapFilename)
+                try fileSystem.createDirectory(path.parentDirectory, recursive: true)
+                let moduleMapGenerator = ModuleMapGenerator(targetName: clangTarget.name, moduleName: clangTarget.c99name, publicHeadersDir: clangTarget.includeDir, fileSystem: fileSystem)
+                try moduleMapGenerator.generateModuleMap(type: generatedModuleMapType, at: path)
+                moduleMapPath = path
                 isGenerated = true
             }
 
@@ -624,7 +628,7 @@ public func xcodeProject(
                     }
                 }
                 let config = assignment.conditions.compactMap { $0 as? ConfigurationCondition }.first?.configuration
-                appendSetting(assignment.value, forDecl: decl, to: xcodeTarget.buildSettings, config: config)
+                try appendSetting(assignment.value, forDecl: decl, to: xcodeTarget.buildSettings, config: config)
             }
         }
     }
@@ -640,7 +644,7 @@ public func xcodeProject(
 
         // For each target on which this one depends, add a target dependency
         // and also link against the target's product.
-        for case .target(let dependency, _) in target.recursiveDependencies() {
+        for case .target(let dependency, _) in try target.recursiveDependencies() {
             // We should never find ourself in the list of dependencies.
             assert(dependency != target)
 
@@ -684,10 +688,10 @@ public func xcodeProject(
     for product in graph.reachableProducts {
         // Go on to next product if we already have a target with the same name.
         if targetNames.contains(product.name) { continue }
-        // Otherwise, create an aggreate target.
+        // Otherwise, create an aggregate target.
         let package = packagesByProduct[product]!
         let aggregateTarget = project.addTarget(
-            objectID: "\(package.name)::\(product.name)::ProductTarget",
+            objectID: "\(package.manifestName)::\(product.name)::ProductTarget", // TODO: use identity instead?
             productType: nil, name: product.name)
         // Add dependencies on the targets created for each of the dependencies.
         for target in product.targets {
@@ -738,7 +742,7 @@ private extension SupportedLanguageExtension {
 }
 
 private extension ResolvedTarget {
-    func fileType(forSource source: RelativePath) -> String {
+    func fileType(forSource source: RelativePath) throws -> String {
         switch underlyingTarget {
         case is SwiftTarget:
             // SwiftModules only has one type of source so just always return this.
@@ -746,18 +750,18 @@ private extension ResolvedTarget {
 
         case is ClangTarget:
             guard let suffix = source.suffix else {
-                fatalError("Source \(source) doesn't have an extension in C family target \(name)")
+                throw InternalError("Source \(source) doesn't have an extension in C family target \(name)")
             }
             // Suffix includes `.` so drop it.
             assert(suffix.hasPrefix("."))
             let fileExtension = String(suffix.dropFirst())
             guard let ext = SupportedLanguageExtension(rawValue: fileExtension) else {
-                fatalError("Unknown source extension \(source) in C family target \(name)")
+                throw InternalError("Unknown source extension \(source) in C family target \(name)")
             }
             return ext.xcodeFileType
 
         default:
-            fatalError("unexpected target type")
+            throw InternalError("unexpected target type")
         }
     }
 }
@@ -781,7 +785,7 @@ func appendSetting(
     forDecl decl: BuildSettings.Declaration,
     to table: Xcode.BuildSettingsTable,
     config: BuildConfiguration? = nil
-) {
+) throws {
     switch decl {
     // FIXME: This switch case is kind of sad but we need to convert Xcode's
     // build model to be of reference type in order to avoid it.
@@ -876,6 +880,6 @@ func appendSetting(
         }
 
     default:
-        fatalError("Unhandled decl \(decl)")
+        throw InternalError("Unhandled decl \(decl)")
     }
 }

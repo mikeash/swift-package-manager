@@ -1,7 +1,7 @@
 /*
  This source file is part of the Swift.org open source project
 
- Copyright (c) 2014 - 2020 Apple Inc. and the Swift project authors
+ Copyright (c) 2014 - 2021 Apple Inc. and the Swift project authors
  Licensed under Apache License v2.0 with Runtime Library Exception
 
  See http://swift.org/LICENSE.txt for license information
@@ -13,6 +13,7 @@ import Foundation
 import TSCBasic
 import TSCUtility
 
+import Basics
 import PackageModel
 import PackageLoading
 import PackageGraph
@@ -20,13 +21,18 @@ import PackageGraph
 /// The parameters required by `PIFBuilder`.
 public struct PIFBuilderParameters {
 
+    /// Whether or not build for testability is enabled.
+    public let enableTestability: Bool
+
     /// Whether to create dylibs for dynamic library products.
     public let shouldCreateDylibForDynamicProducts: Bool
 
     /// Creates a `PIFBuilderParameters` instance.
     /// - Parameters:
+    ///   - enableTestability: Whether or not build for testability is enabled.
     ///   - shouldCreateDylibForDynamicProducts: Whether to create dylibs for dynamic library products.
-    public init(shouldCreateDylibForDynamicProducts: Bool) {
+    public init(enableTestability: Bool, shouldCreateDylibForDynamicProducts: Bool) {
+        self.enableTestability = enableTestability
         self.shouldCreateDylibForDynamicProducts = shouldCreateDylibForDynamicProducts
     }
 }
@@ -80,21 +86,13 @@ public final class PIFBuilder {
         prettyPrint: Bool = true,
         preservePIFModelStructure: Bool = false
     ) throws -> String {
-        let encoder = JSONEncoder()
-        if prettyPrint {
-            encoder.outputFormatting = .prettyPrinted
-          #if os(macOS)
-            if #available(OSX 10.13, *) {
-                encoder.outputFormatting.insert(.sortedKeys)
-            }
-          #endif
-        }
-
+        let encoder = prettyPrint ? JSONEncoder.makeWithDefaults() : JSONEncoder()
+        
         if !preservePIFModelStructure {
             encoder.userInfo[.encodeForXCBuild] = true
         }
 
-        let topLevelObject = construct()
+        let topLevelObject = try self.construct()
 
         // Sign the pif objects before encoding it for XCBuild.
         try PIF.sign(topLevelObject.workspace)
@@ -104,13 +102,13 @@ public final class PIFBuilder {
     }
 
     /// Constructs a `PIF.TopLevelObject` representing the package graph.
-    public func construct() -> PIF.TopLevelObject {
-        memoize(to: &pif) {
+    public func construct() throws -> PIF.TopLevelObject {
+        try memoize(to: &pif) {
             let rootPackage = graph.rootPackages[0]
 
-            let sortedPackages = graph.packages.sorted { $0.name < $1.name }
-            var projects: [PIFProjectBuilder] = sortedPackages.map { package in
-                PackagePIFProjectBuilder(
+            let sortedPackages = graph.packages.sorted { $0.manifestName < $1.manifestName } // TODO: use identity instead?
+            var projects: [PIFProjectBuilder] = try sortedPackages.map { package in
+                try PackagePIFProjectBuilder(
                     package: package,
                     parameters: parameters,
                     diagnostics: diagnostics,
@@ -122,9 +120,9 @@ public final class PIFBuilder {
 
             let workspace = PIF.Workspace(
                 guid: "Workspace:\(rootPackage.path.pathString)",
-                name: rootPackage.name,
+                name: rootPackage.manifestName,  // TODO: use identity instead?
                 path: rootPackage.path,
-                projects: projects.map { $0.construct() }
+                projects: try projects.map { try $0.construct() }
             )
 
             return PIF.TopLevelObject(workspace: workspace)
@@ -189,7 +187,7 @@ class PIFProjectBuilder {
         return target
     }
 
-    func construct() -> PIF.Project {
+    func construct() throws -> PIF.Project {
         let buildConfigurations = self.buildConfigurations.map { builder -> PIF.BuildConfiguration in
             builder.guid = "\(guid)::BUILDCONFIG_\(builder.name)"
             return builder.construct()
@@ -198,7 +196,7 @@ class PIFProjectBuilder {
         // Construct group tree before targets to make sure file references have GUIDs.
         groupTree.guid = "\(guid)::MAINGROUP"
         let groupTree = self.groupTree.construct() as! PIF.Group
-        let targets = self.targets.map { $0.construct() }
+        let targets = try self.targets.map { try $0.construct() }
 
         return PIF.Project(
             guid: guid,
@@ -228,7 +226,7 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
         parameters: PIFBuilderParameters,
         diagnostics: DiagnosticsEngine,
         fileSystem: FileSystem
-    ) {
+    ) throws {
         self.package = package
         self.parameters = parameters
         self.diagnostics = diagnostics
@@ -241,7 +239,7 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
         super.init()
 
         guid = package.pifProjectGUID
-        name = package.name
+        name = package.manifestName // TODO: use identity instead?
         path = package.path
         projectDirectory = package.path
         developmentRegion = package.manifest.defaultLocalization ?? "en"
@@ -258,8 +256,10 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
         let firstTarget = package.targets.first(where: { $0.type != .test })?.underlyingTarget ?? package.targets.first?.underlyingTarget
         settings[.MACOSX_DEPLOYMENT_TARGET] = firstTarget?.deploymentTarget(for: .macOS)
         settings[.IPHONEOS_DEPLOYMENT_TARGET] = firstTarget?.deploymentTarget(for: .iOS)
+        settings[.IPHONEOS_DEPLOYMENT_TARGET, for: .macCatalyst] = firstTarget?.deploymentTarget(for: .macCatalyst)
         settings[.TVOS_DEPLOYMENT_TARGET] = firstTarget?.deploymentTarget(for: .tvOS)
         settings[.WATCHOS_DEPLOYMENT_TARGET] = firstTarget?.deploymentTarget(for: .watchOS)
+        settings[.DRIVERKIT_DEPLOYMENT_TARGET] = firstTarget?.deploymentTarget(for: .driverKit)
         settings[.DYLIB_INSTALL_NAME_BASE] = "@rpath"
         settings[.USE_HEADERMAP] = "NO"
         settings[.SWIFT_ACTIVE_COMPILATION_CONDITIONS] = ["$(inherited)", "SWIFT_PACKAGE"]
@@ -312,6 +312,11 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
         releaseSettings[.DEBUG_INFORMATION_FORMAT] = "dwarf-with-dsym"
         releaseSettings[.GCC_OPTIMIZATION_LEVEL] = "s"
         releaseSettings[.SWIFT_OPTIMIZATION_LEVEL] = "-Owholemodule"
+
+        if parameters.enableTestability {
+            releaseSettings[.ENABLE_TESTABILITY] = "YES"
+        }
+
         addBuildConfiguration(name: "Release", settings: releaseSettings)
 
         for product in package.products.sorted(by: { $0.name < $1.name }) {
@@ -319,7 +324,7 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
         }
 
         for target in package.targets.sorted(by: { $0.name < $1.name }) {
-            addTarget(for: target)
+            try self.addTarget(for: target)
         }
 
         if binaryGroup.children.isEmpty {
@@ -333,21 +338,26 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
             addMainModuleTarget(for: product)
         case .library:
             addLibraryTarget(for: product)
+        case .plugin:
+            return
         }
     }
 
-    private func addTarget(for target: ResolvedTarget) {
+    private func addTarget(for target: ResolvedTarget) throws {
         switch target.type {
         case .library:
-            addLibraryTarget(for: target)
+            try self.addLibraryTarget(for: target)
         case .systemModule:
-            addSystemTarget(for: target)
+            try self.addSystemTarget(for: target)
         case .executable, .test:
             // Skip executable module targets and test module targets (they will have been dealt with as part of the
             // products to which they belong).
             return
         case .binary:
             // Binary target don't need to be built.
+            return
+        case .plugin:
+            // Package plugin targets.
             return
         }
     }
@@ -447,9 +457,15 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
         let executableName: String
         let productType: PIF.Target.ProductType
         if product.type == .library(.dynamic) {
-            pifTargetProductName = product.name + ".framework"
-            executableName = product.name
-            productType = .framework
+            if parameters.shouldCreateDylibForDynamicProducts {
+                pifTargetProductName = "lib\(product.name).dylib"
+                executableName = pifTargetProductName
+                productType = .dynamicLibrary
+            } else {
+                pifTargetProductName = product.name + ".framework"
+                executableName = product.name
+                productType = .framework
+            }
         } else {
             pifTargetProductName = "lib\(product.name).a"
             executableName = pifTargetProductName
@@ -525,7 +541,7 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
         pifTarget.addBuildConfiguration(name: "Release", settings: settings)
     }
 
-    private func addLibraryTarget(for target: ResolvedTarget) {
+    private func addLibraryTarget(for target: ResolvedTarget) throws {
         let pifTarget = addTarget(
             guid: target.pifTargetGUID,
             name: target.name,
@@ -553,7 +569,8 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
 
         let generatedModuleMapDir = "$(OBJROOT)/GeneratedModuleMaps/$(PLATFORM_NAME)"
         let moduleMapFile = "\(generatedModuleMapDir)/\(target.name).modulemap"
-        let moduleMapFileContents: String
+        let moduleMapFileContents: String?
+        let shouldImpartModuleMap: Bool
 
         if let clangTarget = target.underlyingTarget as? ClangTarget {
             // Let the target itself find its own headers.
@@ -563,15 +580,23 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
 
             // Also propagate this search path to all direct and indirect clients.
             impartedSettings[.HEADER_SEARCH_PATHS, default: ["$(inherited)"]].append(clangTarget.includeDir.pathString)
-            impartedSettings[.OTHER_SWIFT_FLAGS, default: ["$(inherited)"]] +=
-                ["-Xcc", "-fmodule-map-file=\(moduleMapFile)"]
 
-            moduleMapFileContents = """
-                module \(target.c99name) {
-                    umbrella "\(clangTarget.includeDir.pathString)"
-                    export *
-                }
-                """
+            if !fileSystem.exists(clangTarget.moduleMapPath) {
+                impartedSettings[.OTHER_SWIFT_FLAGS, default: ["$(inherited)"]] +=
+                    ["-Xcc", "-fmodule-map-file=\(moduleMapFile)"]
+
+                moduleMapFileContents = """
+                    module \(target.c99name) {
+                        umbrella "\(clangTarget.includeDir.pathString)"
+                        export *
+                    }
+                    """
+
+                shouldImpartModuleMap = true
+            } else {
+                moduleMapFileContents = nil
+                shouldImpartModuleMap = false
+            }
         } else if let swiftTarget = target.underlyingTarget as? SwiftTarget {
             settings[.SWIFT_VERSION] = swiftTarget.swiftVersion.description
             // Generate ObjC compatibility header for Swift library targets.
@@ -584,15 +609,21 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
                     export *
                 }
                 """
+
+            shouldImpartModuleMap = true
         } else {
-            fatalError("unexpected target")
+            throw InternalError("unexpected target")
         }
 
-        settings[.MODULEMAP_PATH] = moduleMapFile
-        settings[.MODULEMAP_FILE_CONTENTS] = moduleMapFileContents
+        if let moduleMapFileContents = moduleMapFileContents {
+            settings[.MODULEMAP_PATH] = moduleMapFile
+            settings[.MODULEMAP_FILE_CONTENTS] = moduleMapFileContents
+        }
 
         // Pass the path of the module map up to all direct and indirect clients.
-        impartedSettings[.OTHER_CFLAGS, default: ["$(inherited)"]].append("-fmodule-map-file=\(moduleMapFile)")
+        if shouldImpartModuleMap {
+            impartedSettings[.OTHER_CFLAGS, default: ["$(inherited)"]].append("-fmodule-map-file=\(moduleMapFile)")
+        }
         impartedSettings[.OTHER_LDRFLAGS] = []
 
         if target.underlyingTarget.isCxx {
@@ -629,9 +660,9 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
         pifTarget.impartedBuildSettings = impartedSettings
     }
 
-    private func addSystemTarget(for target: ResolvedTarget) {
+    private func addSystemTarget(for target: ResolvedTarget) throws {
         guard let systemTarget = target.underlyingTarget as? SystemLibraryTarget else {
-            fatalError("unexpected target type")
+            throw InternalError("unexpected target type")
         }
 
         // Create an aggregate PIF target (which doesn't have an actual product).
@@ -643,7 +674,7 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
         var impartedSettings = PIF.BuildSettings()
 
         var cFlags: [String] = []
-        if let result = pkgConfigArgs(for: systemTarget, diagnostics: diagnostics, fileSystem: fileSystem) {
+        for result in pkgConfigArgs(for: systemTarget, diagnostics: diagnostics, fileSystem: fileSystem) {
             if let error = result.error {
                 let location = PkgConfigDiagnosticLocation(pcFile: result.pkgConfigName, target: target.name)
                 diagnostics.emit(warning: "\(error)", location: location)
@@ -736,7 +767,7 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
             return nil
         }
 
-        let bundleName = "\(package.name)_\(target.name)"
+        let bundleName = "\(package.manifestName)_\(target.name)" // TODO: use identity instead?
         let resourcesTarget = addTarget(
             guid: target.pifResourceTargetGUID,
             name: bundleName,
@@ -754,7 +785,7 @@ final class PackagePIFProjectBuilder: PIFProjectBuilder {
         settings[.TARGET_NAME] = bundleName
         settings[.PRODUCT_NAME] = bundleName
         settings[.PRODUCT_MODULE_NAME] = bundleName
-        let bundleIdentifier = "\(package.name).\(target.name).resources".spm_mangledToBundleIdentifier()
+        let bundleIdentifier = "\(package.manifestName).\(target.name).resources".spm_mangledToBundleIdentifier() // TODO: use identity instead?
         settings[.PRODUCT_BUNDLE_IDENTIFIER] = bundleIdentifier
         settings[.GENERATE_INFOPLIST_FILE] = "YES"
         settings[.PACKAGE_RESOURCE_TARGET_KIND] = "resource"
@@ -878,7 +909,7 @@ final class AggregatePIFProjectBuilder: PIFProjectBuilder {
     }
 }
 
-protocol PIFReferenceBuilder: class {
+protocol PIFReferenceBuilder: AnyObject {
     var guid: String { get set }
 
     func construct() -> PIF.Reference
@@ -1001,8 +1032,8 @@ class PIFBaseTargetBuilder {
         return builder
     }
 
-    func construct() -> PIF.BaseTarget {
-        fatalError("implement in subclass")
+    func construct() throws -> PIF.BaseTarget {
+        throw InternalError("implement in subclass")
     }
 
     /// Adds a "headers" build phase, i.e. one that copies headers into a directory of the product, after suitable
@@ -1086,22 +1117,22 @@ class PIFBaseTargetBuilder {
         }
     }
 
-    fileprivate func constructBuildPhases() -> [PIF.BuildPhase] {
-        buildPhases.enumerated().map { kvp in
+    fileprivate func constructBuildPhases() throws -> [PIF.BuildPhase] {
+        try buildPhases.enumerated().map { kvp in
             let (index, builder) = kvp
             builder.guid = "\(guid)::BUILDPHASE_\(index)"
-            return builder.construct()
+            return try builder.construct()
         }
     }
 }
 
 final class PIFAggregateTargetBuilder: PIFBaseTargetBuilder {
-    override func construct() -> PIF.BaseTarget {
+    override func construct() throws -> PIF.BaseTarget {
         return PIF.AggregateTarget(
             guid: guid,
             name: name,
             buildConfigurations: constructBuildConfigurations(),
-            buildPhases: constructBuildPhases(),
+            buildPhases: try self.constructBuildPhases(),
             dependencies: dependencies,
             impartedBuildSettings: impartedBuildSettings
         )
@@ -1119,14 +1150,14 @@ final class PIFTargetBuilder: PIFBaseTargetBuilder {
         super.init(guid: guid, name: name)
     }
 
-    override func construct() -> PIF.BaseTarget {
+    override func construct() throws -> PIF.BaseTarget {
         return PIF.Target(
             guid: guid,
             name: name,
             productType: productType,
             productName: productName,
             buildConfigurations: constructBuildConfigurations(),
-            buildPhases: constructBuildPhases(),
+            buildPhases: try self.constructBuildPhases(),
             dependencies: dependencies,
             impartedBuildSettings: impartedBuildSettings
         )
@@ -1163,8 +1194,8 @@ class PIFBuildPhaseBuilder {
         return builder
     }
 
-    func construct() -> PIF.BuildPhase {
-        fatalError("implement in subclass")
+    func construct() throws -> PIF.BuildPhase {
+        throw InternalError("implement in subclass")
     }
 
     fileprivate func constructBuildFiles() -> [PIF.BuildFile] {
@@ -1260,7 +1291,7 @@ final class PIFBuildConfigurationBuilder {
 // PIF target and a PIF product can have the same name (as they often do).
 
 extension ResolvedPackage {
-    var pifProjectGUID: PIF.GUID { "PACKAGE:\(manifest.url)" }
+    var pifProjectGUID: PIF.GUID { "PACKAGE:\(manifest.packageLocation)" }
 }
 
 extension ResolvedProduct {
@@ -1310,6 +1341,9 @@ extension Target {
     func deploymentTarget(for platform: PackageModel.Platform) -> String? {
         if let supportedPlatform = getSupportedPlatform(for: platform) {
             return supportedPlatform.version.versionString
+        } else if platform == .macCatalyst {
+            // If there is no deployment target specified for Mac Catalyst, fall back to the iOS deployment target.
+            return deploymentTarget(for: .iOS)
         } else if platform.oldestSupportedVersion != .unknown {
             return platform.oldestSupportedVersion.versionString
         } else {
@@ -1335,6 +1369,8 @@ extension ProductType {
             return .test
         case .library:
             return .library
+        case .plugin:
+            return .plugin
         }
     }
 }
@@ -1438,6 +1474,9 @@ extension Array where Element == PackageConditionProtocol {
             case .macOS:
                 result += PIF.PlatformFilter.macOSFilters
 
+            case .macCatalyst:
+                result += PIF.PlatformFilter.macCatalystFilters
+
             case .iOS:
                 result += PIF.PlatformFilter.iOSFilters
 
@@ -1456,6 +1495,9 @@ extension Array where Element == PackageConditionProtocol {
             case .windows:
                 result += PIF.PlatformFilter.windowsFilters
 
+            case .driverKit:
+                result += PIF.PlatformFilter.driverKitFilters
+
             default:
                 assertionFailure("Unhandled platform condition: \(condition)")
                 break
@@ -1469,6 +1511,11 @@ extension PIF.PlatformFilter {
 
     /// macOS platform filters.
     public static let macOSFilters: [PIF.PlatformFilter] = [.init(platform: "macos")]
+
+    /// Mac Catalyst platform filters.
+    public static let macCatalystFilters: [PIF.PlatformFilter] = [
+        .init(platform: "ios", environment: "maccatalyst")
+    ]
 
     /// iOS platform filters.
     public static let iOSFilters: [PIF.PlatformFilter] = [
@@ -1486,6 +1533,11 @@ extension PIF.PlatformFilter {
     public static let watchOSFilters: [PIF.PlatformFilter] = [
         .init(platform: "watchos"),
         .init(platform: "watchos", environment: "simulator")
+    ]
+
+    /// DriverKit platform filters.
+    public static let driverKitFilters: [PIF.PlatformFilter] = [
+        .init(platform: "driverkit"),
     ]
 
     /// Windows platform filters.
@@ -1513,9 +1565,11 @@ private extension PIF.BuildSettings.Platform {
         switch platform {
         case .iOS: return .iOS
         case .linux: return .linux
+        case .macCatalyst: return .macCatalyst
         case .macOS: return .macOS
         case .tvOS: return .tvOS
         case .watchOS: return .watchOS
+        case .driverKit: return .driverKit
         default: return nil
         }
     }

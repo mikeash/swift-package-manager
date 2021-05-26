@@ -13,6 +13,7 @@ import XCTest
 import TSCBasic
 import PackageGraph
 import PackageModel
+import PackageLoading
 import SPMTestSupport
 
 class PackageGraphPerfTests: XCTestCasePerf {
@@ -24,50 +25,53 @@ class PackageGraphPerfTests: XCTestCasePerf {
         let fs = InMemoryFileSystem(emptyFiles: files)
         
         var externalManifests = [Manifest]()
-        var rootManifests: [Manifest]!
+        var rootManifest: Manifest!
         for pkg in 1...N {
             let name = "Foo\(pkg)"
-            let url = "/" + name
+            let location = "/" + name
 
             let dependencies: [PackageDependencyDescription]
             let targets: [TargetDescription]
             // Create package.
             if pkg == N {
                 dependencies = []
-                targets = [TargetDescription(name: name, path: ".")]
+                targets = [try TargetDescription(name: name, path: ".")]
             } else {
                 let depName = "Foo\(pkg + 1)"
                 let depUrl = "/\(depName)"
-                dependencies = [PackageDependencyDescription(name: depName, url: depUrl, requirement: .upToNextMajor(from: "1.0.0"))]
-                targets = [TargetDescription(name: name, dependencies: [.byName(name: depName, condition: nil)], path: ".")]
+                dependencies = [.scm(name: depName, location: depUrl, requirement: .upToNextMajor(from: "1.0.0"))]
+                targets = [try TargetDescription(name: name, dependencies: [.byName(name: depName, condition: nil)], path: ".")]
             }
             // Create manifest.
             let isRoot = pkg == 1
             let manifest = Manifest(
                 name: name,
+                path: AbsolutePath(location).appending(component: Manifest.filename),
+                packageKind: isRoot ? .root : .remote,
+                packageLocation: location,
                 platforms: [],
-                path: AbsolutePath(url).appending(component: Manifest.filename),
-                url: url,
                 version: "1.0.0",
                 toolsVersion: .v4_2,
-                packageKind: isRoot ? .root : .remote,
                 dependencies: dependencies,
                 products: [
-                    ProductDescription(name: name, targets: [name])
+                    ProductDescription(name: name, type: .library(.automatic), targets: [name])
                 ],
                 targets: targets
             )
             if isRoot {
-                rootManifests = [manifest]
+                rootManifest = manifest
             } else {
                 externalManifests.append(manifest)
             }
         }
-        
+
+        let identityResolver = DefaultIdentityResolver()
+
         measure {
             let diagnostics = DiagnosticsEngine()
-            let g = PackageGraphLoader().load(
-                root: PackageGraphRoot(input: PackageGraphRootInput(packages: rootManifests.map({$0.path})), manifests: rootManifests),
+            let g = try! PackageGraph.load(
+                root: PackageGraphRoot(input: PackageGraphRootInput(packages: [rootManifest.path]), manifests: [rootManifest.path: rootManifest]),
+                identityResolver: identityResolver,
                 externalManifests: externalManifests,
                 diagnostics: diagnostics,
                 fileSystem: fs)

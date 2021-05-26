@@ -13,7 +13,7 @@ import TSCBasic
 import PackageModel
 import TSCUtility
 
-/// An utility to compute the source/resource files of a target.
+/// A utility to compute the source/resource files of a target.
 public struct TargetSourcesBuilder {
     /// The target for which we're computing source/resource files.
     public let target: TargetDescription
@@ -66,7 +66,12 @@ public struct TargetSourcesBuilder {
         self.defaultLocalization = defaultLocalization
         self.diags = diags
         self.targetPath = path
-        self.rules = FileRuleDescription.builtinRules
+        if toolsVersion <= ToolsVersion.v5_4 {
+            // In version 5.4 and earlier, we did not support `additionalFileRules` and always implicitly included XCBuild file types.
+            self.rules = FileRuleDescription.builtinRules + FileRuleDescription.xcbuildFileTypes
+        } else {
+            self.rules = FileRuleDescription.builtinRules + additionalFileRules
+        }
         self.toolsVersion = toolsVersion
         self.fs = fs
         let excludedPaths = target.exclude.map{ path.appending(RelativePath($0)) }
@@ -83,12 +88,42 @@ public struct TargetSourcesBuilder {
             }
         }
         self.declaredSources = declaredSources?.spm_uniqueElements()
+        
+        self.excludedPaths.forEach { exclude in
+            if let message = validTargetPath(at: exclude) {
+                let warning = "Invalid Exclude '\(exclude)': \(message)."
+                self.diags.emit(warning: warning)
+            }
+        }
+        
+        self.declaredSources?.forEach { source in
+            if let message = validTargetPath(at: source) {
+                let warning = "Invalid Source '\(source)': \(message)."
+                self.diags.emit(warning: warning)
+            }
+        }
 
       #if DEBUG
         validateRules(self.rules)
       #endif
     }
 
+    @discardableResult
+    private func validTargetPath(at: AbsolutePath) -> Error? {
+        // Check if paths that are enumerated in targets: [] exist
+        guard self.fs.exists(at) else {
+            return StringError("File not found")
+        }
+
+        // Excludes, Sources, and Resources should be found at the root of the package and or
+        // its subdirectories
+        guard at.pathString.hasPrefix(self.packagePath.pathString) else {
+            return StringError("File must be within the package directory structure")
+        }
+        
+        return nil
+    }
+    
     /// Emits an error in debug mode if we have conflicting rules for any file type.
     private func validateRules(_ rules: [FileRuleDescription]) {
         var extensionMap: [String: FileRuleDescription] = [:]
@@ -103,7 +138,7 @@ public struct TargetSourcesBuilder {
     }
 
     /// Run the builder to produce the sources of the target.
-    public func run() throws -> (sources: Sources, resources: [Resource], headers: [AbsolutePath]) {
+    public func run() throws -> (sources: Sources, resources: [Resource], headers: [AbsolutePath], others: [AbsolutePath]) {
         let contents = computeContents()
         var pathToRule: [AbsolutePath: Rule] = [:]
 
@@ -114,15 +149,17 @@ public struct TargetSourcesBuilder {
         // Emit an error if we found files without a matching rule in
         // tools version >= v5_3. This will be activated once resources
         // support is complete.
+        var others: [AbsolutePath] = []
         if toolsVersion >= .v5_3 {
             let filesWithNoRules = pathToRule.filter { $0.value.rule == .none }
             if !filesWithNoRules.isEmpty {
-                var error = "found \(filesWithNoRules.count) file(s) which are unhandled; explicitly declare them as resources or exclude from the target\n"
+                var warning = "found \(filesWithNoRules.count) file(s) which are unhandled; explicitly declare them as resources or exclude from the target\n"
                 for (file, _) in filesWithNoRules {
-                    error += "    " + file.pathString + "\n"
+                    warning += "    " + file.pathString + "\n"
                 }
-                diags.emit(.error(error))
+                diags.emit(.warning(warning))
             }
+            others.append(contentsOf: filesWithNoRules.keys)
         }
 
         let headers = pathToRule.lazy.filter { $0.value.rule == .header }.map { $0.key }.sorted()
@@ -135,13 +172,14 @@ public struct TargetSourcesBuilder {
         diagnoseLocalizedAndUnlocalizedVariants(in: resources)
         diagnoseMissingDevelopmentRegionResource(in: resources)
         diagnoseInfoPlistConflicts(in: resources)
+        diagnoseInvalidResource(in: target.resources)
 
         // It's an error to contain mixed language source files.
         if sources.containsMixedLanguage {
             throw Target.Error.mixedSources(targetPath)
         }
 
-        return (sources, resources, headers)
+        return (sources, resources, headers, others)
     }
 
     private struct Rule {
@@ -308,6 +346,16 @@ public struct TargetSourcesBuilder {
                 diags.emit(.infoPlistResourceConflict(
                     path: resource.path.relative(to: targetPath),
                     targetName: target.name))
+            }
+        }
+    }
+    
+    private func diagnoseInvalidResource(in resources: [TargetDescription.Resource]) {
+        resources.forEach { resource in
+            let resourcePath = self.targetPath.appending(RelativePath(resource.path))
+            if let message = validTargetPath(at: resourcePath) {
+                let warning = "Invalid Resource '\(resource.path)': \(message)."
+                self.diags.emit(warning: warning)
             }
         }
     }
@@ -517,7 +565,7 @@ public struct FileRuleDescription {
         .init(
             rule: .header,
             toolsVersion: .minimumRequired,
-            fileTypes: ["h"]
+            fileTypes: ["h", "hh", "hpp", "h++", "hp", "hxx", "H", "ipp", "def"]
         )
     }()
 
@@ -564,7 +612,7 @@ public struct FileRuleDescription {
         asm,
         modulemap,
         header,
-    ] + xcbuildFileTypes
+    ]
 
     /// List of file types that requires the Xcode build system.
     public static let xcbuildFileTypes: [FileRuleDescription] = [

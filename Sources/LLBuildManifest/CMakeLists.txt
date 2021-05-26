@@ -15,15 +15,17 @@ add_library(LLBuildManifest
   Target.swift
   Tools.swift)
 target_link_libraries(LLBuildManifest PUBLIC
-  TSCBasic)
+  TSCBasic
+  Basics)
 
 # NOTE(compnerd) workaround for CMake not setting up include flags yet
 set_target_properties(LLBuildManifest PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_Swift_MODULE_DIRECTORY})
 
-if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+if(USE_CMAKE_INSTALL)
     install(TARGETS LLBuildManifest
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
 endif()
+set_property(GLOBAL APPEND PROPERTY SwiftPM_EXPORTS LLBuildManifest)

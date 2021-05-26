@@ -1,7 +1,7 @@
 /*
  This source file is part of the Swift.org open source project
 
- Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+ Copyright (c) 2014 - 2020 Apple Inc. and the Swift project authors
  Licensed under Apache License v2.0 with Runtime Library Exception
 
  See http://swift.org/LICENSE.txt for license information
@@ -26,19 +26,22 @@ class GenerateXcodeprojTests: XCTestCase {
         XCTAssertEqual(xcodeprojPath, expectedPath)
     }
 
-    func testXcodebuildCanParseIt() {
+    func testXcodebuildCanParseIt() throws {
       #if os(macOS)
-        mktmpdir { dstdir in
-            let fileSystem = InMemoryFileSystem(emptyFiles: "/Sources/DummyModuleName/source.swift")
+      try testWithTemporaryDirectory { dstdir in
+            let packagePath = dstdir.appending(component: "foo")
+            let modulePath = packagePath.appending(components: "Sources", "DummyModuleName")
+            try makeDirectories(modulePath)
+            try localFileSystem.writeFileContents(modulePath.appending(component: "source.swift"), bytes: "")
 
             let diagnostics = DiagnosticsEngine()
-            let graph = loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
+            let graph = try loadPackageGraph(fs: localFileSystem, diagnostics: diagnostics,
                 manifests: [
                     Manifest.createV4Manifest(
                         name: "Foo",
-                        path: "/",
-                        url: "/foo",
+                        path: packagePath.pathString,
                         packageKind: .root,
+                        packageLocation: packagePath.pathString,
                         targets: [
                             TargetDescription(name: "DummyModuleName"),
                         ])
@@ -77,68 +80,76 @@ class GenerateXcodeprojTests: XCTestCase {
     }
 
     func testXcconfigOverrideValidatesPath() throws {
-        let fileSystem = InMemoryFileSystem(emptyFiles: "/Bar/Sources/Bar/bar.swift")
-        let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
-            manifests: [
-                Manifest.createV4Manifest(
-                    name: "Bar",
-                    path: "/Bar",
-                    url: "/Bar",
-                    packageKind: .root,
-                    targets: [
-                        TargetDescription(name: "Bar"),
-                    ])
-            ]
-        )
-        XCTAssertNoDiagnostics(diagnostics)
+        try testWithTemporaryDirectory { dstdir in
+            let packagePath = dstdir.appending(component: "Bar")
+            let modulePath = packagePath.appending(components: "Sources", "Bar")
+            try makeDirectories(modulePath)
+            try localFileSystem.writeFileContents(modulePath.appending(component: "bar.swift"), bytes: "")
 
-        let options = XcodeprojOptions(xcconfigOverrides: AbsolutePath("/doesntexist"))
-        do {
-            _ = try xcodeProject(xcodeprojPath: AbsolutePath.root.appending(component: "xcodeproj"),
-                                 graph: graph, extraDirs: [], extraFiles: [], options: options, fileSystem: fileSystem, diagnostics: diagnostics)
-            XCTFail("Project generation should have failed")
-        } catch ProjectGenerationError.xcconfigOverrideNotFound(let path) {
-            XCTAssertEqual(options.xcconfigOverrides, path)
-        } catch {
-            XCTFail("Project generation shouldn't have had another error")
+            let diagnostics = DiagnosticsEngine()
+            let graph = try loadPackageGraph(fs: localFileSystem, diagnostics: diagnostics,
+                manifests: [
+                    Manifest.createV4Manifest(
+                        name: "Bar",
+                        path: packagePath.pathString,
+                        packageKind: .root,
+                        packageLocation: packagePath.pathString,
+                        targets: [
+                            TargetDescription(name: "Bar"),
+                        ])
+                ]
+            )
+            XCTAssertNoDiagnostics(diagnostics)
+
+            let options = XcodeprojOptions(xcconfigOverrides: AbsolutePath("/doesntexist"))
+            do {
+                _ = try xcodeProject(xcodeprojPath: AbsolutePath.root.appending(component: "xcodeproj"),
+                                     graph: graph, extraDirs: [], extraFiles: [], options: options, fileSystem: localFileSystem, diagnostics: diagnostics)
+                XCTFail("Project generation should have failed")
+            } catch ProjectGenerationError.xcconfigOverrideNotFound(let path) {
+                XCTAssertEqual(options.xcconfigOverrides, path)
+            } catch {
+                XCTFail("Project generation shouldn't have had another error")
+            }
         }
     }
 
     func testGenerateXcodeprojWithInvalidModuleNames() throws {
-        let warningStream = BufferedOutputByteStream()
-        let fileSystem = InMemoryFileSystem(
-            emptyFiles: "/Bar/Sources/Modules/example.swift"
-        )
+        try testWithTemporaryDirectory { dstdir in
+            let packagePath = dstdir.appending(component: "Bar")
+            let modulePath = packagePath.appending(components: "Sources", "Modules")
+            try makeDirectories(modulePath)
+            try localFileSystem.writeFileContents(modulePath.appending(component: "example.swift"), bytes: "")
 
-        let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
-            manifests: [
-                Manifest.createV4Manifest(
-                    name: "Modules",
-                    path: "/Bar",
-                    url: "/Bar",
-                    packageKind: .root,
-                    targets: [
-                        TargetDescription(name: "Modules"),
-                    ])
-            ]
-        )
-        XCTAssertNoDiagnostics(diagnostics)
+            let diagnostics = DiagnosticsEngine()
+            let graph = try loadPackageGraph(fs: localFileSystem, diagnostics: diagnostics,
+                manifests: [
+                    Manifest.createV4Manifest(
+                        name: "Modules",
+                        path: packagePath.pathString,
+                        packageKind: .root,
+                        packageLocation: packagePath.pathString,
+                        targets: [
+                            TargetDescription(name: "Modules"),
+                        ])
+                ]
+            )
+            XCTAssertNoDiagnostics(diagnostics)
 
-        _ = try xcodeProject(
-            xcodeprojPath: AbsolutePath.root.appending(component: "xcodeproj"),
-            graph: graph, extraDirs: [], extraFiles: [],
-            options: XcodeprojOptions(), fileSystem: fileSystem,
-            diagnostics: diagnostics, warningStream: warningStream)
+            let warningStream = BufferedOutputByteStream()
+            _ = try xcodeProject(
+                xcodeprojPath: AbsolutePath.root.appending(component: "xcodeproj"),
+                graph: graph, extraDirs: [], extraFiles: [],
+                options: XcodeprojOptions(), fileSystem: localFileSystem,
+                diagnostics: diagnostics, warningStream: warningStream)
 
-        let warnings = warningStream.bytes.description
-        XCTAssertMatch(warnings, .contains("warning: Target 'Modules' conflicts with required framework filenames, rename this target to avoid conflicts."))
+            let warnings = warningStream.bytes.description
+            XCTAssertMatch(warnings, .contains("warning: Target 'Modules' conflicts with required framework filenames, rename this target to avoid conflicts."))
+        }
     }
 
-    func testGenerateXcodeprojWithoutGitRepo() {
-        mktmpdir { dstdir in
-
+    func testGenerateXcodeprojWithoutGitRepo() throws {
+        try testWithTemporaryDirectory { dstdir in
             let packagePath = dstdir.appending(component: "Foo")
             let modulePath = packagePath.appending(components: "Sources", "DummyModule")
             try makeDirectories(modulePath)
@@ -146,14 +157,14 @@ class GenerateXcodeprojTests: XCTestCase {
             try localFileSystem.writeFileContents(packagePath.appending(component: "a.txt"), bytes: "dummy_data")
 
             let diagnostics = DiagnosticsEngine()
-            let graph = loadPackageGraph(
+            let graph = try loadPackageGraph(
                 fs: localFileSystem, diagnostics: diagnostics,
                 manifests: [
                     Manifest.createV4Manifest(
                         name: "Foo",
                         path: packagePath.pathString,
-                        url: packagePath.pathString,
                         packageKind: .root,
+                        packageLocation: packagePath.pathString,
                         targets: [
                             TargetDescription(name: "DummyModule"),
                         ])
@@ -169,8 +180,8 @@ class GenerateXcodeprojTests: XCTestCase {
         }
     }
 
-    func testGenerateXcodeprojWithDotFiles() {
-        mktmpdir { dstdir in
+    func testGenerateXcodeprojWithDotFiles() throws {
+        try testWithTemporaryDirectory { dstdir in
 
             let packagePath = dstdir.appending(component: "Foo")
             let modulePath = packagePath.appending(components: "Sources", "DummyModule")
@@ -181,14 +192,14 @@ class GenerateXcodeprojTests: XCTestCase {
             initGitRepo(packagePath, addFile: false)
 
             let diagnostics = DiagnosticsEngine()
-            let graph = loadPackageGraph(
+            let graph = try loadPackageGraph(
                 fs: localFileSystem, diagnostics: diagnostics,
                 manifests: [
                     Manifest.createV4Manifest(
                         name: "Foo",
                         path: packagePath.pathString,
-                        url: packagePath.pathString,
                         packageKind: .root,
+                        packageLocation: packagePath.pathString,
                         targets: [
                             TargetDescription(name: "DummyModule"),
                         ])
@@ -204,9 +215,8 @@ class GenerateXcodeprojTests: XCTestCase {
         }
     }
 
-    func testGenerateXcodeprojWithRootFiles() {
-        mktmpdir { dstdir in
-
+    func testGenerateXcodeprojWithRootFiles() throws {
+        try testWithTemporaryDirectory { dstdir in
             let packagePath = dstdir.appending(component: "Foo")
             let modulePath = packagePath.appending(components: "Sources", "DummyModule")
             try makeDirectories(modulePath)
@@ -216,14 +226,14 @@ class GenerateXcodeprojTests: XCTestCase {
             initGitRepo(packagePath, addFile: false)
 
             let diagnostics = DiagnosticsEngine()
-            let graph = loadPackageGraph(
+            let graph = try loadPackageGraph(
                 fs: localFileSystem, diagnostics: diagnostics,
                 manifests: [
                     Manifest.createV4Manifest(
                         name: "Foo",
                         path: packagePath.pathString,
-                        url: packagePath.pathString,
                         packageKind: .root,
+                        packageLocation: packagePath.pathString,
                         targets: [
                             TargetDescription(name: "DummyModule"),
                         ])
@@ -242,10 +252,10 @@ class GenerateXcodeprojTests: XCTestCase {
         }
     }
 
-    func testGenerateXcodeprojWithNonSourceFilesInSourceDirectories() {
-        mktmpdir { dstdir in
+    func testGenerateXcodeprojWithNonSourceFilesInSourceDirectories() throws {
+        try testWithTemporaryDirectory { tmpdir in
 
-            let packagePath = dstdir.appending(component: "Foo")
+            let packagePath = tmpdir.appending(component: "Foo")
             let modulePath = packagePath.appending(components: "Sources", "DummyModule")
             try makeDirectories(modulePath)
             try localFileSystem.writeFileContents(modulePath.appending(component: "dummy.swift"), bytes: "dummy_data")
@@ -254,14 +264,14 @@ class GenerateXcodeprojTests: XCTestCase {
             initGitRepo(packagePath, addFile: false)
 
             let diagnostics = DiagnosticsEngine()
-            let graph = loadPackageGraph(
+            let graph = try loadPackageGraph(
                 fs: localFileSystem, diagnostics: diagnostics,
                 manifests: [
                     Manifest.createV4Manifest(
                         name: "Foo",
                         path: packagePath.pathString,
-                        url: packagePath.pathString,
                         packageKind: .root,
+                        packageLocation: packagePath.pathString,
                         targets: [
                             TargetDescription(name: "DummyModule"),
                         ])
@@ -270,7 +280,7 @@ class GenerateXcodeprojTests: XCTestCase {
             XCTAssertNoDiagnostics(diagnostics)
 
             let projectName = "DummyProjectName"
-            let outpath = Xcodeproj.buildXcodeprojPath(outputDir: dstdir, projectName: projectName)
+            let outpath = Xcodeproj.buildXcodeprojPath(outputDir: tmpdir, projectName: projectName)
             let project = try Xcodeproj.generate(projectName: projectName, xcodeprojPath: outpath, graph: graph, options: XcodeprojOptions(), diagnostics: diagnostics)
 
             let sources = project.mainGroup.subitems[1] as? Xcode.Group
@@ -281,8 +291,8 @@ class GenerateXcodeprojTests: XCTestCase {
         }
     }
 
-    func testGenerateXcodeprojWithFilesIgnoredByGit() {
-        mktmpdir { dstdir in
+    func testGenerateXcodeprojWithFilesIgnoredByGit() throws {
+        try testWithTemporaryDirectory { dstdir in
 
             let packagePath = dstdir.appending(component: "Foo")
             let modulePath = packagePath.appending(components: "Sources", "DummyModule")
@@ -297,14 +307,14 @@ class GenerateXcodeprojTests: XCTestCase {
             try localFileSystem.writeFileContents(packagePath.appending(component: "ignored_file"), bytes: "dummy_data")
 
             let diagnostics = DiagnosticsEngine()
-            let graph = loadPackageGraph(
+            let graph = try loadPackageGraph(
                 fs: localFileSystem, diagnostics: diagnostics,
                 manifests: [
                     Manifest.createV4Manifest(
                         name: "Foo",
                         path: packagePath.pathString,
-                        url: packagePath.pathString,
                         packageKind: .root,
+                        packageLocation: packagePath.pathString,
                         targets: [
                             TargetDescription(name: "DummyModule"),
                         ])
@@ -324,8 +334,8 @@ class GenerateXcodeprojTests: XCTestCase {
         }
     }
 
-    func testGenerateXcodeprojWarnsConditionalTargetDependencies() {
-        mktmpdir { dstdir in
+    func testGenerateXcodeprojWarnsConditionalTargetDependencies() throws {
+        try testWithTemporaryDirectory { dstdir in
             let fooPackagePath = dstdir.appending(component: "Foo")
             let fooTargetPath = fooPackagePath.appending(components: "Sources", "Foo")
             try makeDirectories(fooTargetPath)
@@ -340,14 +350,14 @@ class GenerateXcodeprojTests: XCTestCase {
             try localFileSystem.writeFileContents(bar2TargetPath.appending(component: "Sources.swift"), bytes: "")
 
             let diagnostics = DiagnosticsEngine()
-            let graph = loadPackageGraph(fs: localFileSystem, diagnostics: diagnostics,
+            let graph = try loadPackageGraph(fs: localFileSystem, diagnostics: diagnostics,
                 manifests: [
                     Manifest.createV4Manifest(
                         name: "Foo",
                         path: fooPackagePath.pathString,
-                        url: fooPackagePath.pathString,
+                        packageLocation: fooPackagePath.pathString,
                         dependencies: [
-                            PackageDependencyDescription(name: "Bar", url: barPackagePath.pathString, requirement: .localPackage)
+                            .local(name: "Bar", path: barPackagePath)
                         ],
                         targets: [
                             TargetDescription(name: "Foo", dependencies: [
@@ -357,10 +367,10 @@ class GenerateXcodeprojTests: XCTestCase {
                     Manifest.createV4Manifest(
                         name: "Bar",
                         path: barPackagePath.pathString,
-                        url: barPackagePath.pathString,
                         packageKind: .remote,
+                        packageLocation: barPackagePath.pathString,
                         products: [
-                            ProductDescription(name: "Bar", targets: ["Bar1"])
+                            ProductDescription(name: "Bar", type: .library(.automatic), targets: ["Bar1"])
                         ],
                         targets: [
                             TargetDescription(name: "Bar1", dependencies: [
@@ -389,4 +399,11 @@ class GenerateXcodeprojTests: XCTestCase {
             }
         }
     }
+
+    func testGenerateXcodeprojDeprecation() {
+            fixture(name: "DependencyResolution/External/Simple/Foo") { path in
+                let (_, stderr) = try SwiftPMProduct.SwiftPackage.execute(["generate-xcodeproj"], packagePath: path)
+                XCTAssertMatch(stderr, .contains("'generate-xcodeproj' is no longer needed and will be deprecated soon"))
+            }
+        }
 }

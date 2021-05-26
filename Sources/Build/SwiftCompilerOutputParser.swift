@@ -28,14 +28,14 @@ public struct SwiftCompilerMessage {
         public struct BeganInfo {
             public let pid: Int
             public let inputs: [String]
-            public let outputs: [Output]
+            public let outputs: [Output]?
             public let commandExecutable: String
             public let commandArguments: [String]
 
             public init(
                 pid: Int,
                 inputs: [String],
-                outputs: [Output],
+                outputs: [Output]?,
                 commandExecutable: String,
                 commandArguments: [String]
             ) {
@@ -49,7 +49,7 @@ public struct SwiftCompilerMessage {
 
         public struct SkippedInfo {
             public let inputs: [String]
-            public let outputs: [Output]
+            public let outputs: [Output]?
 
             public init(inputs: [String], outputs: [SwiftCompilerMessage.Kind.Output]) {
                 self.inputs = inputs
@@ -84,7 +84,7 @@ public struct SwiftCompilerMessage {
 }
 
 /// Protocol for the parser delegate to get notified of parsing events.
-public protocol SwiftCompilerOutputParserDelegate: class {
+public protocol SwiftCompilerOutputParserDelegate: AnyObject {
 
     /// Called for each message parsed.
     func swiftCompilerOutputParser(_ parser: SwiftCompilerOutputParser, didParse message: SwiftCompilerMessage)
@@ -117,7 +117,7 @@ public final class SwiftCompilerOutputParser {
         self.targetName = targetName
         self.delegate = delegate
 
-        let decoder = JSONDecoder()
+        let decoder = JSONDecoder.makeWithDefaults()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         jsonParser = JSONMessageStreamingParser<SwiftCompilerOutputParser>(delegate: self, decoder: decoder)
     }

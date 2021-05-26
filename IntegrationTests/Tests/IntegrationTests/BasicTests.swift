@@ -17,10 +17,9 @@ final class BasicTests: XCTestCase {
         XCTAssertMatch(try sh(swift, "--version").stdout, .contains("Swift version"))
     }
 
-    // Disabled because these packages don't use the latest runtime library which doesn't work with self-hosted builds.
-    //
-    // FIXME: We should to use XCTSkip to skip this test instead.
-    func DISABLED_testExamplePackageDealer() throws {
+    func testExamplePackageDealer() throws {
+        try XCTSkipIf(isSelfHosted, "These packages don't use the latest runtime library, which doesn't work with self-hosted builds.")
+
         try withTemporaryDirectory { dir in
             let dealerDir = dir.appending(component: "dealer")
             try sh("git", "clone", "https://github.com/apple/example-package-dealer", dealerDir)
@@ -97,6 +96,8 @@ final class BasicTests: XCTestCase {
     }
 
     func testSwiftPackageInitExec() throws {
+        try XCTSkipUnless(swiftcSupportsRenamingMainSymbol(), "skipping because host compiler doesn't support `-entry-point-function-name`")
+        
         try withTemporaryDirectory { dir in
             // Create a new package with an executable target.
             let projectDir = dir.appending(component: "Project")
@@ -120,8 +121,9 @@ final class BasicTests: XCTestCase {
         }
     }
 
-    // TODO: Check why this test is failing to test in Xcode and through the command line.
-    func _testSwiftPackageInitLib() throws {
+    func testSwiftPackageInitLib() throws {
+        try XCTSkip("FIXME: swift-test invocations are timing out in Xcode and self-hosted CI")
+
         try withTemporaryDirectory { dir in
             // Create a new package with an executable target.
             let projectDir = dir.appending(component: "Project")
@@ -181,6 +183,8 @@ final class BasicTests: XCTestCase {
     }
 
     func testSwiftRun() throws {
+        try XCTSkipUnless(swiftcSupportsRenamingMainSymbol(), "skipping because host compiler doesn't support `-entry-point-function-name`")
+
         try withTemporaryDirectory { dir in
             let toolDir = dir.appending(component: "secho")
             try localFileSystem.createDirectory(toolDir)
@@ -203,6 +207,8 @@ final class BasicTests: XCTestCase {
     }
 
     func testSwiftTest() throws {
+        try XCTSkip("FIXME: swift-test invocations are timing out in Xcode and self-hosted CI")
+
         try withTemporaryDirectory { dir in
             let toolDir = dir.appending(component: "swiftTest")
             try localFileSystem.createDirectory(toolDir)
@@ -222,14 +228,92 @@ final class BasicTests: XCTestCase {
                         func testBaz() { }
                     }
                     """))
-            let testOutput = try sh(swiftTest, "--package-path", toolDir, "--filter", "MyTests.*").stderr
+            let testOutput = try sh(swiftTest, "--package-path", toolDir, "--filter", "MyTests.*", "--skip", "testBaz").stderr
 
             // Check the test log.
             XCTAssertContents(testOutput) { checker in
                 checker.check(.contains("Test Suite 'MyTests' started"))
                 checker.check(.contains("Test Suite 'MyTests' passed"))
-                checker.check(.contains("Executed 3 tests, with 0 failures"))
+                checker.check(.contains("Executed 2 tests, with 0 failures"))
             }
+        }
+    }
+  
+    func testSwiftTestWithResources() throws {
+        try XCTSkip("FIXME: swift-test invocations are timing out in Xcode and self-hosted CI")
+
+        try withTemporaryDirectory { dir in
+            let toolDir = dir.appending(component: "swiftTestResources")
+            try localFileSystem.createDirectory(toolDir)
+            try localFileSystem.writeFileContents(
+              toolDir.appending(component: "Package.swift"),
+              bytes: ByteString(encodingAsUTF8: """
+                    // swift-tools-version:5.3
+                    import PackageDescription
+
+                    let package = Package(
+                       name: "AwesomeResources",
+                       targets: [
+                           .target(name: "AwesomeResources", resources: [.copy("hello.txt")]),
+                           .testTarget(name: "AwesomeResourcesTest", dependencies: ["AwesomeResources"], resources: [.copy("world.txt")])
+                       ]
+                    )
+                    """)
+            )
+            try localFileSystem.createDirectory(toolDir.appending(component: "Sources"))
+            try localFileSystem.createDirectory(toolDir.appending(components: "Sources", "AwesomeResources"))
+            try localFileSystem.writeFileContents(
+              toolDir.appending(components: "Sources", "AwesomeResources", "AwesomeResource.swift"),
+              bytes: ByteString(encodingAsUTF8: """
+                    import Foundation
+
+                    public struct AwesomeResource {
+                      public init() {}
+                      public let hello = try! String(contentsOf: Bundle.module.url(forResource: "hello", withExtension: "txt")!)
+                    }
+
+                    """)
+            )
+
+            try localFileSystem.writeFileContents(
+              toolDir.appending(components: "Sources", "AwesomeResources", "hello.txt"),
+              bytes: ByteString(encodingAsUTF8: "hello")
+            )
+
+            try localFileSystem.createDirectory(toolDir.appending(component: "Tests"))
+            try localFileSystem.createDirectory(toolDir.appending(components: "Tests", "AwesomeResourcesTest"))
+
+            try localFileSystem.writeFileContents(
+              toolDir.appending(components: "Tests", "AwesomeResourcesTest", "world.txt"),
+              bytes: ByteString(encodingAsUTF8: "world")
+            )
+
+            try localFileSystem.writeFileContents(
+                toolDir.appending(components: "Tests", "AwesomeResourcesTest", "MyTests.swift"),
+                bytes: ByteString(encodingAsUTF8: """
+                    import XCTest
+                    import Foundation
+                    import AwesomeResources
+
+                    final class MyTests: XCTestCase {
+                        func testFoo() {
+                            XCTAssertTrue(AwesomeResource().hello == "hello")
+                        }
+                        func testBar() {
+                            let world = try! String(contentsOf: Bundle.module.url(forResource: "world", withExtension: "txt")!)
+                            XCTAssertTrue(world == "world")
+                        }
+                    }
+                    """))
+          
+            let testOutput = try sh(swiftTest, "--package-path", toolDir, "--filter", "MyTests.*").stderr
+
+//             Check the test log.
+              XCTAssertContents(testOutput) { checker in
+                  checker.check(.contains("Test Suite 'MyTests' started"))
+                  checker.check(.contains("Test Suite 'MyTests' passed"))
+                  checker.check(.contains("Executed 2 tests, with 0 failures"))
+              }
         }
     }
 }

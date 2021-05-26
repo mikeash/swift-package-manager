@@ -68,7 +68,7 @@ public enum WorkspaceDiagnostics {
     }
 
     /// The diagnostic triggered when an operation fails because its completion
-    /// would loose the unpushed changes in a repository.
+    /// would lose the unpushed changes in a repository.
     public struct UnpushedChanges: DiagnosticData, Swift.Error {
         /// The local path to the repository.
         public let repositoryPath: AbsolutePath
@@ -141,15 +141,61 @@ extension Diagnostic.Message {
         .error("checksum of downloaded artifact of binary target '\(targetName)' (\(actualChecksum)) does not match checksum specified by the manifest (\(expectedChecksum))")
     }
 
-    static func artifactFailedDownload(targetName: String, reason: String) -> Diagnostic.Message {
-        .error("artifact of binary target '\(targetName)' failed download: \(reason)")
+    static func artifactFailedDownload(artifactURL: Foundation.URL, targetName: String, reason: String) -> Diagnostic.Message {
+        .error("failed downloading '\(artifactURL.absoluteString)' which is required by binary target '\(targetName)': \(reason)")
     }
 
-    static func artifactFailedExtraction(targetName: String, reason: String) -> Diagnostic.Message {
-        .error("artifact of binary target '\(targetName)' failed extraction: \(reason)")
+    static func artifactFailedExtraction(artifactURL: Foundation.URL, targetName: String, reason: String) -> Diagnostic.Message {
+        .error("failed extracting '\(artifactURL.absoluteString)' which is required by binary target '\(targetName)': \(reason)")
     }
 
     static func artifactNotFound(targetName: String, artifactName: String) -> Diagnostic.Message {
         .error("downloaded archive of binary target '\(targetName)' does not contain expected binary artifact '\(artifactName)'")
+    }
+}
+
+
+extension FileSystemError: CustomStringConvertible {
+    
+    public var description: String {
+        guard let path = path else {
+            switch self.kind {
+            case .invalidAccess:
+                return "invalid access"
+            case .ioError:
+                return "encountered I/O error"
+            case .isDirectory:
+                return "is a directory"
+            case .noEntry:
+                return "doesn't exist in file system"
+            case .notDirectory:
+                return "is not a directory"
+            case .unsupported:
+                return "unsupported operation"
+            case .unknownOSError:
+                return "unknown system error"
+            case .alreadyExistsAtDestination:
+                return "already exists in file system"
+            }
+        }
+
+        switch self.kind {
+        case .invalidAccess:
+            return "invalid access to \(path)"
+        case .ioError:
+            return "encountered an I/O error while reading \(path)"
+        case .isDirectory:
+            return "\(path) is a directory"
+        case .noEntry:
+            return "\(path) doesn't exist in file system"
+        case .notDirectory:
+            return "\(path) is not a directory"
+        case .unsupported:
+            return "unsupported operation on \(path)"
+        case .unknownOSError:
+            return "unknown system error while operating on \(path)"
+        case .alreadyExistsAtDestination:
+            return "\(path) already exists in file system"
+        }
     }
 }

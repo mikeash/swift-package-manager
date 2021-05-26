@@ -1,17 +1,17 @@
 /*
  This source file is part of the Swift.org open source project
 
- Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+ Copyright (c) 2014 - 2021 Apple Inc. and the Swift project authors
  Licensed under Apache License v2.0 with Runtime Library Exception
 
  See http://swift.org/LICENSE.txt for license information
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 */
 
+import Basics
 import TSCBasic
 import PackageModel
 import TSCUtility
-import SPMLLBuild
 import Foundation
 public typealias FileSystem = TSCBasic.FileSystem
 
@@ -41,6 +41,12 @@ public protocol ManifestResourceProvider {
 
     /// The bin directory.
     var binDir: AbsolutePath? { get }
+
+    /// Extra flags to pass the Swift compiler.
+    var swiftCompilerFlags: [String] { get }
+
+    /// XCTest Location
+    var xctestLocation: AbsolutePath? { get }
 }
 
 /// Default implemention for the resource provider.
@@ -53,6 +59,14 @@ public extension ManifestResourceProvider {
     var binDir: AbsolutePath? {
         return nil
     }
+
+    var swiftCompilerFlags: [String] {
+        return []
+    }
+
+    var xctestLocation: AbsolutePath? {
+        return nil
+    }
 }
 
 /// Protocol for the manifest loader interface.
@@ -60,59 +74,38 @@ public protocol ManifestLoaderProtocol {
     /// Load the manifest for the package at `path`.
     ///
     /// - Parameters:
-    ///   - path: The root path of the package.
-    ///   - baseURL: The URL the manifest was loaded from.
-    ///   - version: The version the manifest is from, if known.
-    ///   - revision: The revision the manifest is from, if known.
+    ///   - at: The root path of the package.
+    ///   - packageIdentity: the identity of the package
+    ///   - packageKind: The kind of package the manifest is from.
+    ///   - packageLocation: The location the package the manifest was loaded from.
+    ///   - version: Optional. The version the manifest is from, if known.
+    ///   - revision: Optional. The revision the manifest is from, if known
     ///   - toolsVersion: The version of the tools the manifest supports.
-    ///   - kind: The kind of package the manifest is from.
-    ///   - fileSystem: If given, the file system to load from (otherwise load from the local file system).
-    ///   - diagnostics: The diagnostics engine.
+    ///   - identityResolver: A helper to resolve identities based on configuration
+    ///   - fileSystem: The file system to load from.
+    ///   - diagnostics: Optional.  The diagnostics engine.
+    ///   - on: The dispatch queue to perform asynchronous operations on.
+    ///   - completion: The completion handler .
     func load(
-        packagePath path: AbsolutePath,
-        baseURL: String,
+        at path: AbsolutePath,
+        packageIdentity: PackageIdentity,
+        packageKind: PackageReference.Kind,
+        packageLocation: String,
         version: Version?,
         revision: String?,
         toolsVersion: ToolsVersion,
-        packageKind: PackageReference.Kind,
-        fileSystem: FileSystem?,
-        diagnostics: DiagnosticsEngine?
-    ) throws -> Manifest
-}
+        identityResolver: IdentityResolver,
+        fileSystem: FileSystem,
+        diagnostics: DiagnosticsEngine?,
+        on queue: DispatchQueue,
+        completion: @escaping (Result<Manifest, Error>) -> Void
+    )
 
-extension ManifestLoaderProtocol {
-    /// Load the manifest for the package at `path`.
-    ///
-    /// - Parameters:
-    ///   - path: The root path of the package.
-    ///   - baseURL: The URL the manifest was loaded from.
-    ///   - version: The version the manifest is from, if known.
-    ///   - revision: The revision the manifest is from, if known.
-    ///   - toolsVersion: The version of the tools the manifest supports.
-    ///   - kind: The kind of package the manifest is from.
-    ///   - fileSystem: If given, the file system to load from (otherwise load from the local file system).
-    ///   - diagnostics: The diagnostics engine.
-    public func load(
-        package path: AbsolutePath,
-        baseURL: String,
-        version: Version? = nil,
-        revision: String? = nil,
-        toolsVersion: ToolsVersion,
-        packageKind: PackageReference.Kind,
-        fileSystem: FileSystem? = nil,
-        diagnostics: DiagnosticsEngine? = nil
-    ) throws -> Manifest {
-        return try load(
-            packagePath: path,
-            baseURL: baseURL,
-            version: version,
-            revision: revision,
-            toolsVersion: toolsVersion,
-            packageKind: packageKind,
-            fileSystem: fileSystem,
-            diagnostics: diagnostics
-        )
-    }
+    /// Reset any internal cache held by the manifest loader.
+    func resetCache() throws
+
+    /// Reset any internal cache held by the manifest loader and purge any entries in a shared cache
+    func purgeCache() throws
 }
 
 public protocol ManifestLoaderDelegate {
@@ -128,202 +121,299 @@ public protocol ManifestLoaderDelegate {
 /// serialized form of the manifest (as implemented by `PackageDescription`'s
 /// `atexit()` handler) which is then deserialized and loaded.
 public final class ManifestLoader: ManifestLoaderProtocol {
+    private static var _hostTriple = ThreadSafeBox<Triple>()
+    private static var _packageDescriptionMinimumDeploymentTarget = ThreadSafeBox<String>()
 
-    let resources: ManifestResourceProvider
-    let serializedDiagnostics: Bool
-    let isManifestSandboxEnabled: Bool
-    var isManifestCachingEnabled: Bool {
-        return cacheDir != nil
-    }
-    let cacheDir: AbsolutePath!
-    let delegate: ManifestLoaderDelegate?
+    private let resources: ManifestResourceProvider
+    private let serializedDiagnostics: Bool
+    private let isManifestSandboxEnabled: Bool
+    private let delegate: ManifestLoaderDelegate?
+    private let extraManifestFlags: [String]
+
+    private let databaseCacheDir: AbsolutePath?
+
+    private let sdkRootCache = ThreadSafeBox<AbsolutePath>()
+
+    private let operationQueue: OperationQueue
 
     public init(
         manifestResources: ManifestResourceProvider,
         serializedDiagnostics: Bool = false,
         isManifestSandboxEnabled: Bool = true,
         cacheDir: AbsolutePath? = nil,
-        delegate: ManifestLoaderDelegate? = nil
+        delegate: ManifestLoaderDelegate? = nil,
+        extraManifestFlags: [String] = []
     ) {
         self.resources = manifestResources
         self.serializedDiagnostics = serializedDiagnostics
         self.isManifestSandboxEnabled = isManifestSandboxEnabled
         self.delegate = delegate
+        self.extraManifestFlags = extraManifestFlags
 
-        // Resolve symlinks since we can't use them in sandbox profiles.
-        if let cacheDir = cacheDir {
-            try? localFileSystem.createDirectory(cacheDir, recursive: true)
-        }
-        self.cacheDir = cacheDir.map(resolveSymlinks)
+        self.databaseCacheDir = cacheDir.map(resolveSymlinks)
+
+        self.operationQueue = OperationQueue()
+        self.operationQueue.name = "org.swift.swiftpm.manifest-loader"
+        self.operationQueue.maxConcurrentOperationCount = Concurrency.maxOperations
     }
 
-    @available(*, deprecated)
-    public convenience init(
-        resources: ManifestResourceProvider,
-        isManifestSandboxEnabled: Bool = true
+    // deprecated 3/21, remove once clients migrated over
+    @available(*, deprecated, message: "use loadRootManifest instead")
+    public static func loadManifest(
+        at path: AbsolutePath,
+        kind: PackageReference.Kind,
+        swiftCompiler: AbsolutePath,
+        swiftCompilerFlags: [String],
+        identityResolver: IdentityResolver,
+        on queue: DispatchQueue,
+        completion: @escaping (Result<Manifest, Error>) -> Void
     ) {
-        self.init(
-            manifestResources: resources,
-            isManifestSandboxEnabled: isManifestSandboxEnabled
-       )
+        do {
+            let fileSystem = localFileSystem
+            let resources = try UserManifestResources(swiftCompiler: swiftCompiler, swiftCompilerFlags: swiftCompilerFlags)
+            let loader = ManifestLoader(manifestResources: resources)
+            let toolsVersion = try ToolsVersionLoader().load(at: path, fileSystem: fileSystem)
+            let packageLocation = path.pathString
+            let packageIdentity = identityResolver.resolveIdentity(for: packageLocation)
+            loader.load(
+                at: path,
+                packageIdentity: packageIdentity,
+                packageKind: kind,
+                packageLocation: packageLocation,
+                version: nil,
+                revision: nil,
+                toolsVersion: toolsVersion,
+                identityResolver: identityResolver,
+                fileSystem: fileSystem,
+                diagnostics: nil,
+                on: queue,
+                completion: completion
+            )
+        } catch {
+            return completion(.failure(error))
+        }
     }
 
-    /// Loads a manifest from a package repository using the resources associated with a particular `swiftc` executable.
+    /// Loads a root manifest from a path using the resources associated with a particular `swiftc` executable.
     ///
     /// - Parameters:
-    ///     - packagePath: The absolute path of the package root.
-    ///     - swiftCompiler: The absolute path of a `swiftc` executable.
-    ///         Its associated resources will be used by the loader.
-    ///     - kind: The kind of package the manifest is from.
-    public static func loadManifest(
-        packagePath: AbsolutePath,
+    ///   - at: The absolute path of the package root.
+    ///   - swiftCompiler: The absolute path of a `swiftc` executable. Its associated resources will be used by the loader.
+    ///   - identityResolver: A helper to resolve identities based on configuration
+    ///   - diagnostics: Optional.  The diagnostics engine.
+    ///   - on: The dispatch queue to perform asynchronous operations on.
+    ///   - completion: The completion handler .
+    public static func loadRootManifest(
+        at path: AbsolutePath,
         swiftCompiler: AbsolutePath,
-        packageKind: PackageReference.Kind
-    ) throws -> Manifest {
-        let resources = try UserManifestResources(swiftCompiler: swiftCompiler)
-        let loader = ManifestLoader(manifestResources: resources)
-        let toolsVersion = try ToolsVersionLoader().load(at: packagePath, fileSystem: localFileSystem)
-        return try loader.load(
-            package: packagePath,
-            baseURL: packagePath.pathString,
-            toolsVersion: toolsVersion,
-            packageKind: packageKind
-        )
+        swiftCompilerFlags: [String],
+        identityResolver: IdentityResolver,
+        diagnostics: DiagnosticsEngine? = nil,
+        fileSystem: FileSystem = localFileSystem,
+        on queue: DispatchQueue,
+        completion: @escaping (Result<Manifest, Error>) -> Void
+    ) {
+        do {
+            let resources = try UserManifestResources(swiftCompiler: swiftCompiler, swiftCompilerFlags: swiftCompilerFlags)
+            let loader = ManifestLoader(manifestResources: resources)
+            let toolsVersion = try ToolsVersionLoader().load(at: path, fileSystem: fileSystem)
+            let packageLocation = fileSystem.isFile(path) ? path.parentDirectory : path
+            let packageIdentity = identityResolver.resolveIdentity(for: packageLocation)
+            loader.load(
+                at: path,
+                packageIdentity: packageIdentity,
+                packageKind: .root,
+                packageLocation: packageLocation.pathString,
+                version: nil,
+                revision: nil,
+                toolsVersion: toolsVersion,
+                identityResolver: identityResolver,
+                fileSystem: fileSystem,
+                diagnostics: diagnostics,
+                on: queue,
+                completion: completion
+            )
+        } catch {
+            return completion(.failure(error))
+        }
+    }
+
+    // deprecated 3/21, remove once clients migrated over
+    @available(*, deprecated, message: "use load(at: packageIdentity:, ...) variant instead")
+    public func load(
+        at path: AbsolutePath,
+        packageKind: PackageReference.Kind,
+        packageLocation: String,
+        version: Version?,
+        revision: String?,
+        toolsVersion: ToolsVersion,
+        identityResolver: IdentityResolver,
+        fileSystem: FileSystem,
+        diagnostics: DiagnosticsEngine? = nil,
+        on queue: DispatchQueue,
+        completion: @escaping (Result<Manifest, Error>) -> Void
+    ) {
+        let packageIdentity = identityResolver.resolveIdentity(for: packageLocation)
+        self.load(at: path,
+                  packageIdentity: packageIdentity,
+                  packageKind: packageKind,
+                  packageLocation: packageLocation,
+                  version: version,
+                  revision: revision,
+                  toolsVersion: toolsVersion,
+                  identityResolver: identityResolver,
+                  fileSystem: fileSystem,
+                  diagnostics: diagnostics,
+                  on: queue,
+                  completion: completion)
     }
 
     public func load(
-        packagePath path: AbsolutePath,
-        baseURL: String,
+        at path: AbsolutePath,
+        packageIdentity: PackageIdentity,
+        packageKind: PackageReference.Kind,
+        packageLocation: String,
         version: Version?,
         revision: String?,
         toolsVersion: ToolsVersion,
-        packageKind: PackageReference.Kind,
-        fileSystem: FileSystem? = nil,
-        diagnostics: DiagnosticsEngine? = nil
-    ) throws -> Manifest {
-        return try loadFile(
-            path: Manifest.path(atPackagePath: path, fileSystem: fileSystem ?? localFileSystem),
-            baseURL: baseURL,
-            version: version,
-            revision: revision,
-            toolsVersion: toolsVersion,
-            packageKind: packageKind,
-            fileSystem: fileSystem,
-            diagnostics: diagnostics
-        )
+        identityResolver: IdentityResolver,
+        fileSystem: FileSystem,
+        diagnostics: DiagnosticsEngine? = nil,
+        on queue: DispatchQueue,
+        completion: @escaping (Result<Manifest, Error>) -> Void
+    ) {
+        do {
+            let manifestPath = try Manifest.path(atPackagePath: path, fileSystem: fileSystem)
+            self.loadFile(at: manifestPath,
+                          packageIdentity: packageIdentity,
+                          packageKind: packageKind,
+                          packageLocation: packageLocation,
+                          version: version,
+                          revision: revision,
+                          toolsVersion: toolsVersion,
+                          identityResolver: identityResolver,
+                          fileSystem: fileSystem,
+                          diagnostics: diagnostics,
+                          on: queue,
+                          completion: completion)
+        } catch {
+            return completion(.failure(error))
+        }
     }
 
-    /// Create a manifest by loading a specific manifest file from the given `path`.
-    ///
-    /// - Parameters:
-    ///   - path: The path to the manifest file (or a package root).
-    ///   - baseURL: The URL the manifest was loaded from.
-    ///   - version: The version the manifest is from, if known.
-    ///   - revision: The revision the manifest is from, if known.
-    ///   - kind: The kind of package the manifest is from.
-    ///   - fileSystem: If given, the file system to load from (otherwise load from the local file system).
-    func loadFile(
-        path inputPath: AbsolutePath,
-        baseURL: String,
+    private func loadFile(
+        at path: AbsolutePath,
+        packageIdentity: PackageIdentity,
+        packageKind: PackageReference.Kind,
+        packageLocation: String,
         version: Version?,
         revision: String?,
         toolsVersion: ToolsVersion,
-        packageKind: PackageReference.Kind,
-        fileSystem: FileSystem? = nil,
-        diagnostics: DiagnosticsEngine? = nil
-    ) throws -> Manifest {
+        identityResolver: IdentityResolver,
+        fileSystem: FileSystem,
+        diagnostics: DiagnosticsEngine? = nil,
+        on queue: DispatchQueue,
+        completion: @escaping (Result<Manifest, Error>) -> Void
+    ) {
+        self.operationQueue.addOperation {
+            do {
+                // Inform the delegate.
+                queue.async {
+                    self.delegate?.willLoad(manifest: path)
+                }
 
-        // Inform the delegate.
-        self.delegate?.willLoad(manifest: inputPath)
+                // Validate that the file exists.
+                guard fileSystem.isFile(path) else {
+                    throw PackageModel.Package.Error.noManifest(
+                        at: path, version: version?.description)
+                }
 
-        // Validate that the file exists.
-        guard (fileSystem ?? localFileSystem).isFile(inputPath) else {
-            throw PackageModel.Package.Error.noManifest(
-                baseURL: baseURL, version: version?.description)
+                // Get the JSON string for the manifest.
+                let jsonString = try self.loadJSONString(
+                    at: path,
+                    packageIdentity: packageIdentity,
+                    toolsVersion: toolsVersion,
+                    fileSystem: fileSystem,
+                    diagnostics: diagnostics
+                )
+
+                // Load the manifest from JSON.
+                let parsedManifest = try ManifestJSONParser.parse(v4: jsonString,
+                                                                  toolsVersion: toolsVersion,
+                                                                  packageLocation: packageLocation,
+                                                                  identityResolver: identityResolver,
+                                                                  fileSystem: fileSystem)
+                // Throw if we encountered any runtime errors.
+                guard parsedManifest.errors.isEmpty else {
+                    throw ManifestParseError.runtimeManifestErrors(parsedManifest.errors)
+                }
+
+                // Convert legacy system packages to the current target‐based model.
+                var products = parsedManifest.products
+                var targets = parsedManifest.targets
+                if products.isEmpty, targets.isEmpty,
+                    fileSystem.isFile(path.parentDirectory.appending(component: moduleMapFilename)) {
+                        products.append(ProductDescription(
+                        name: parsedManifest.name,
+                        type: .library(.automatic),
+                        targets: [parsedManifest.name])
+                    )
+                    targets.append(try TargetDescription(
+                        name: parsedManifest.name,
+                        path: "",
+                        type: .system,
+                        pkgConfig: parsedManifest.pkgConfig,
+                        providers: parsedManifest.providers
+                    ))
+                }
+
+                let manifest = Manifest(
+                    name: parsedManifest.name,
+                    path: path,
+                    packageKind: packageKind,
+                    packageLocation: packageLocation,
+                    defaultLocalization: parsedManifest.defaultLocalization,
+                    platforms: parsedManifest.platforms,
+                    version: version,
+                    revision: revision,
+                    toolsVersion: toolsVersion,
+                    pkgConfig: parsedManifest.pkgConfig,
+                    providers: parsedManifest.providers,
+                    cLanguageStandard: parsedManifest.cLanguageStandard,
+                    cxxLanguageStandard: parsedManifest.cxxLanguageStandard,
+                    swiftLanguageVersions: parsedManifest.swiftLanguageVersions,
+                    dependencies: parsedManifest.dependencies,
+                    products: products,
+                    targets: targets
+                )
+
+                try self.validate(manifest, toolsVersion: toolsVersion, diagnostics: diagnostics)
+
+                if let diagnostics = diagnostics, diagnostics.hasErrors {
+                    throw Diagnostics.fatalError
+                }
+
+                queue.async {
+                    completion(.success(manifest))
+                }
+            } catch {
+                queue.async {
+                    completion(.failure(error))
+                }
+            }
         }
-
-        // Get the JSON string for the manifest.
-        let identity = PackageReference.computeIdentity(packageURL: baseURL)
-        let jsonString = try loadJSONString(
-            path: inputPath,
-            toolsVersion: toolsVersion,
-            packageIdentity: identity,
-            fs: fileSystem,
-            diagnostics: diagnostics
-        )
-
-        // Load the manifest from JSON.
-        let json = try JSON(string: jsonString)
-        var manifestBuilder = ManifestBuilder(
-            toolsVersion: toolsVersion,
-            baseURL: baseURL,
-            fileSystem: fileSystem ?? localFileSystem
-        )
-        try manifestBuilder.build(v4: json, toolsVersion: toolsVersion)
-
-        // Throw if we encountered any runtime errors.
-        guard manifestBuilder.errors.isEmpty else {
-            throw ManifestParseError.runtimeManifestErrors(manifestBuilder.errors)
-        }
-
-        // Convert legacy system packages to the current target‐based model.
-        var products =  manifestBuilder.products
-        var targets = manifestBuilder.targets
-        if products.isEmpty, targets.isEmpty,
-            (fileSystem ?? localFileSystem).isFile(inputPath.parentDirectory.appending(component: moduleMapFilename)) {
-                products.append(ProductDescription(
-                name: manifestBuilder.name,
-                type: .library(.automatic),
-                targets: [manifestBuilder.name])
-            )
-            targets.append(TargetDescription(
-                name: manifestBuilder.name,
-                path: "",
-                type: .system,
-                pkgConfig: manifestBuilder.pkgConfig,
-                providers: manifestBuilder.providers
-            ))
-        }
-
-        let manifest = Manifest(
-            name: manifestBuilder.name,
-            defaultLocalization: manifestBuilder.defaultLocalization,
-            platforms: manifestBuilder.platforms,
-            path: inputPath,
-            url: baseURL,
-            version: version,
-            revision: revision,
-            toolsVersion: toolsVersion,
-            packageKind: packageKind,
-            pkgConfig: manifestBuilder.pkgConfig,
-            providers: manifestBuilder.providers,
-            cLanguageStandard: manifestBuilder.cLanguageStandard,
-            cxxLanguageStandard: manifestBuilder.cxxLanguageStandard,
-            swiftLanguageVersions: manifestBuilder.swiftLanguageVersions,
-            dependencies: manifestBuilder.dependencies,
-            products: products,
-            targets: targets
-        )
-
-        try validate(manifest, toolsVersion: toolsVersion, diagnostics: diagnostics)
-
-        if let diagnostics = diagnostics, diagnostics.hasErrors {
-            throw Diagnostics.fatalError
-        }
-
-        return manifest
     }
 
     /// Validate the provided manifest.
     private func validate(_ manifest: Manifest, toolsVersion: ToolsVersion, diagnostics: DiagnosticsEngine?) throws {
-        try validateTargets(manifest, diagnostics: diagnostics)
-        try validateProducts(manifest, diagnostics: diagnostics)
-        try validateDependencies(manifest, toolsVersion: toolsVersion, diagnostics: diagnostics)
+        try self.validateTargets(manifest, diagnostics: diagnostics)
+        try self.validateProducts(manifest, diagnostics: diagnostics)
+        try self.validateDependencies(manifest, toolsVersion: toolsVersion, diagnostics: diagnostics)
 
         // Checks reserved for tools version 5.2 features
         if toolsVersion >= .v5_2 {
-            try validateTargetDependencyReferences(manifest, diagnostics: diagnostics)
-            try validateBinaryTargets(manifest, diagnostics: diagnostics)
+            try self.validateTargetDependencyReferences(manifest, diagnostics: diagnostics)
+            try self.validateBinaryTargets(manifest, diagnostics: diagnostics)
         }
     }
 
@@ -345,7 +435,7 @@ public final class ManifestLoader: ManifestLoaderProtocol {
             // Check that the product references existing targets.
             for target in product.targets {
                 if !manifest.targetMap.keys.contains(target) {
-                    try diagnostics.emit(.productTargetNotFound(productName: product.name, targetName: target))
+                    try diagnostics.emit(.productTargetNotFound(productName: product.name, targetName: target, validTargets: manifest.targetMap.keys.sorted()))
                 }
             }
 
@@ -363,7 +453,7 @@ public final class ManifestLoader: ManifestLoaderProtocol {
         diagnostics: DiagnosticsEngine?
     ) throws {
         let dependenciesByIdentity = Dictionary(grouping: manifest.dependencies, by: { dependency in
-            PackageReference.computeIdentity(packageURL: dependency.url)
+            dependency.identity
         })
 
         let duplicateDependencyIdentities = dependenciesByIdentity
@@ -376,11 +466,16 @@ public final class ManifestLoader: ManifestLoaderProtocol {
         }
 
         if toolsVersion >= .v5_2 {
-            let duplicateDependencies = duplicateDependencyIdentities.flatMap({ dependenciesByIdentity[$0]! })
+            let duplicateDependencies = try duplicateDependencyIdentities.flatMap{ identifier -> [PackageDependencyDescription] in
+                guard let dependency = dependenciesByIdentity[identifier] else {
+                    throw InternalError("unknown dependency \(identifier)")
+                }
+                return dependency
+            }
             let duplicateDependencyNames = manifest.dependencies
                 .lazy
                 .filter({ !duplicateDependencies.contains($0) })
-                .map({ $0.name })
+                .map({ $0.nameForTargetDependencyResolutionOnly })
                 .spm_findDuplicates()
 
             for name in duplicateDependencyNames {
@@ -392,7 +487,7 @@ public final class ManifestLoader: ManifestLoaderProtocol {
     private func validateBinaryTargets(_ manifest: Manifest, diagnostics: DiagnosticsEngine?) throws {
         // Check that binary targets point to the right file type.
         for target in manifest.targets where target.type == .binary {
-            guard let location = URL(string: target.url ?? target.path!) else {
+            guard let location = URL(string: target.url ?? target.path ?? "") else {
                 try diagnostics.emit(.invalidBinaryLocation(targetName: target.name))
                 continue
             }
@@ -406,7 +501,7 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                 ))
             }
 
-            let validExtensions = isRemote ? ["zip"] : ["xcframework"]
+            let validExtensions = isRemote ? ["zip"] : BinaryTarget.Kind.allCases.map{ $0.fileExtension }
             if !validExtensions.contains(location.pathExtension) {
                 try diagnostics.emit(.unsupportedBinaryLocationExtension(
                     targetName: target.name,
@@ -427,8 +522,9 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                 case .product(_, let packageName, _):
                     if manifest.packageDependency(referencedBy: targetDependency) == nil {
                         try diagnostics.emit(.unknownTargetPackageDependency(
-                            packageName: packageName!,
-                            targetName: target.name
+                            packageName: packageName ?? "unknown package name",
+                            targetName: target.name,
+                            validPackages: manifest.dependencies.map { $0.nameForTargetDependencyResolutionOnly }
                         ))
                     }
                 case .byName(let name, _):
@@ -439,7 +535,8 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                     {
                         try diagnostics.emit(.unknownTargetDependency(
                             dependency: name,
-                            targetName: target.name
+                            targetName: target.name,
+                            validDependencies: manifest.dependencies.map { $0.nameForTargetDependencyResolutionOnly }
                         ))
                     }
                 }
@@ -449,37 +546,26 @@ public final class ManifestLoader: ManifestLoaderProtocol {
 
     /// Load the JSON string for the given manifest.
     private func loadJSONString(
-        path inputPath: AbsolutePath,
+        at path: AbsolutePath,
+        packageIdentity: PackageIdentity,
         toolsVersion: ToolsVersion,
-        packageIdentity: String,
-        fs: FileSystem? = nil,
-        diagnostics: DiagnosticsEngine? = nil
+        fileSystem: FileSystem,
+        diagnostics: DiagnosticsEngine?
     ) throws -> String {
-        let result: ManifestParseResult
-        let pathOrContents: ManifestPathOrContents
 
-        if let fs = fs {
-            let contents = try fs.readFileContents(inputPath).contents
-            pathOrContents = .contents(contents)
-        } else {
-            pathOrContents = .path(inputPath)
-        }
+        let cacheKey = try ManifestCacheKey(
+            packageIdentity: packageIdentity,
+            manifestPath: path,
+            toolsVersion: toolsVersion,
+            env: ProcessEnv.vars,
+            swiftpmVersion: SwiftVersion.currentVersion.displayString,
+            fileSystem: fileSystem
+        )
 
-        if !self.isManifestCachingEnabled {
-            // Load directly if manifest caching is not enabled.
-            result = parse(
-                packageIdentity: packageIdentity,
-                pathOrContents: pathOrContents, toolsVersion: toolsVersion)
-        } else {
-            let key = ManifestLoadRule.RuleKey(
-                packageIdentity: packageIdentity,
-                pathOrContents: pathOrContents, toolsVersion: toolsVersion)
-            result = try getEngine().build(key: key)
-        }
-
+        let result = self.parseAndCacheManifest(key: cacheKey, diagnostics: diagnostics)
         // Throw now if we weren't able to parse the manifest.
         guard let parsedManifest = result.parsedManifest else {
-            let errors = result.errorOutput ?? result.compilerOutput ?? "<unknown>"
+            let errors = result.errorOutput ?? result.compilerOutput ?? "Unknown error parsing manifest for \(packageIdentity)"
             throw ManifestParseError.invalidManifestFormat(errors, diagnosticFile: result.diagnosticFile)
         }
 
@@ -489,13 +575,106 @@ public final class ManifestLoader: ManifestLoaderProtocol {
         // We might have some non-fatal output (warnings/notes) from the compiler even when
         // we were able to parse the manifest successfully.
         if let compilerOutput = result.compilerOutput {
-            diagnostics?.emit(.warning(ManifestLoadingDiagnostic(output: compilerOutput, diagnosticFile: result.diagnosticFile)))
+            // FIXME: Temporary workaround to filter out debug output from integrated Swift driver. [rdar://73710910]
+            if !(compilerOutput.hasPrefix("<unknown>:0: remark: new Swift driver at") && compilerOutput.hasSuffix("will be used")) {
+                diagnostics?.emit(.warning(ManifestLoadingDiagnostic(output: compilerOutput, diagnosticFile: result.diagnosticFile)))
+            }
         }
 
         return parsedManifest
     }
 
-    fileprivate struct ManifestParseResult: LLBuildValue {
+    fileprivate func parseAndCacheManifest(key: ManifestCacheKey, diagnostics: DiagnosticsEngine?) -> ManifestParseResult {
+        let cache = self.databaseCacheDir.map { cacheDir -> SQLiteBackedCache<ManifestParseResult> in
+            let path = Self.manifestCacheDBPath(cacheDir)
+            var configuration = SQLiteBackedCacheConfiguration()
+            // FIXME: expose as user-facing configuration
+            configuration.maxSizeInMegabytes = 100
+            configuration.truncateWhenFull = true
+            return SQLiteBackedCache<ManifestParseResult>(tableName: "MANIFEST_CACHE", location: .path(path), configuration: configuration, diagnosticsEngine: diagnostics)
+        }
+
+        // TODO: we could wrap the failure here with diagnostics if it wasn't optional throughout
+        defer { try? cache?.close() }
+
+        do {
+            if let result = try cache?.get(key: key.sha256Checksum) {
+                return result
+            }
+        } catch {
+            diagnostics?.emit(.warning("failed loading manifest for '\(key.packageIdentity)' from cache: \(error)"))
+        }
+
+        let result = self.parse(packageIdentity: key.packageIdentity,
+                                manifestPath: key.manifestPath,
+                                manifestContents: key.manifestContents,
+                                toolsVersion: key.toolsVersion)
+
+        // only cache successfully parsed manifests,
+        // this is important for swift-pm development
+        if !result.hasErrors {
+            do {
+                try cache?.put(key: key.sha256Checksum, value: result)
+            } catch {
+                diagnostics?.emit(.warning("failed storing manifest for '\(key.packageIdentity)' in cache: \(error)"))
+            }
+        }
+
+        return result
+    }
+
+    internal struct ManifestCacheKey: Hashable {
+        let packageIdentity: PackageIdentity
+        let manifestPath: AbsolutePath
+        let manifestContents: [UInt8]
+        let toolsVersion: ToolsVersion
+        let env: [String: String]
+        let swiftpmVersion: String
+        let sha256Checksum: String
+
+        init (packageIdentity: PackageIdentity,
+              manifestPath: AbsolutePath,
+              toolsVersion: ToolsVersion,
+              env: [String: String],
+              swiftpmVersion: String,
+              fileSystem: FileSystem
+        ) throws {
+            let manifestContents = try fileSystem.readFileContents(manifestPath).contents
+            let sha256Checksum = try Self.computeSHA256Checksum(packageIdentity: packageIdentity, manifestContents: manifestContents, toolsVersion: toolsVersion, env: env, swiftpmVersion: swiftpmVersion)
+
+            self.packageIdentity = packageIdentity
+            self.manifestPath = manifestPath
+            self.manifestContents = manifestContents
+            self.toolsVersion = toolsVersion
+            self.env = env
+            self.swiftpmVersion = swiftpmVersion
+            self.sha256Checksum = sha256Checksum
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(self.sha256Checksum)
+        }
+
+        private static func computeSHA256Checksum(
+            packageIdentity: PackageIdentity,
+            manifestContents: [UInt8],
+            toolsVersion: ToolsVersion,
+            env: [String: String],
+            swiftpmVersion: String
+        ) throws -> String {
+            let stream = BufferedOutputByteStream()
+            stream <<< packageIdentity
+            stream <<< manifestContents
+            stream <<< toolsVersion.description
+            for key in env.keys.sorted(by: >) {
+                stream <<< key <<< env[key]! // forced unwrap safe
+            }
+            stream <<< swiftpmVersion
+            return stream.bytes.sha256Checksum
+        }
+    }
+
+    internal struct ManifestParseResult: Codable {
         var hasErrors: Bool {
             return parsedManifest == nil
         }
@@ -523,15 +702,13 @@ public final class ManifestLoader: ManifestLoaderProtocol {
         }
     }
 
-    private static var _packageDescriptionMinimumDeploymentTarget: String?
-
     /// Parse the manifest at the given path to JSON.
     fileprivate func parse(
-        packageIdentity: String,
-        pathOrContents: ManifestPathOrContents,
+        packageIdentity: PackageIdentity,
+        manifestPath: AbsolutePath,
+        manifestContents: [UInt8],
         toolsVersion: ToolsVersion
     ) -> ManifestParseResult {
-
         /// Helper method for parsing the manifest.
         func _parse(
             path manifestPath: AbsolutePath,
@@ -552,11 +729,10 @@ public final class ManifestLoader: ManifestLoaderProtocol {
 
             // Compute the path to runtime we need to load.
             let runtimePath = self.runtimePath(for: toolsVersion)
-            let compilerFlags = self.interpreterFlags(for: toolsVersion)
 
             // FIXME: Workaround for the module cache bug that's been haunting Swift CI
             // <rdar://problem/48443680>
-            let moduleCachePath = ProcessEnv.vars["SWIFTPM_MODULECACHE_OVERRIDE"] ?? ProcessEnv.vars["SWIFTPM_TESTS_MODULECACHE"]
+            let moduleCachePath = (ProcessEnv.vars["SWIFTPM_MODULECACHE_OVERRIDE"] ?? ProcessEnv.vars["SWIFTPM_TESTS_MODULECACHE"]).flatMap{ AbsolutePath.init($0) }
 
             var cmd: [String] = []
             cmd += [resources.swiftCompiler.pathString]
@@ -578,8 +754,12 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                 cmd += [
                     "-L", runtimePath.pathString,
                     "-lPackageDescription",
-                    "-Xlinker", "-rpath", "-Xlinker", runtimePath.pathString
                 ]
+#if !os(Windows)
+                // -rpath argument is not supported on Windows,
+                // so we add runtimePath to PATH when executing the manifest instead
+                cmd += ["-Xlinker", "-rpath", "-Xlinker", runtimePath.pathString]
+#endif
 
                 // note: this is not correct for all platforms, but we only actually use it on macOS.
                 macOSPackageDescriptionPath = runtimePath.appending(RelativePath("libPackageDescription.dylib"))
@@ -587,22 +767,28 @@ public final class ManifestLoader: ManifestLoaderProtocol {
 
             // Use the same minimum deployment target as the PackageDescription library (with a fallback of 10.15).
             #if os(macOS)
-            if Self._packageDescriptionMinimumDeploymentTarget == nil {
-                Self._packageDescriptionMinimumDeploymentTarget = (try MinimumDeploymentTarget.computeMinimumDeploymentTarget(of: macOSPackageDescriptionPath))?.versionString ?? "10.15"
+            let triple = Self._hostTriple.memoize {
+                Triple.getHostTriple(usingSwiftCompiler: resources.swiftCompiler)
             }
-            let version = Self._packageDescriptionMinimumDeploymentTarget!
-            cmd += ["-target", "x86_64-apple-macosx\(version)"]
+
+            let version = try Self._packageDescriptionMinimumDeploymentTarget.memoize {
+                (try MinimumDeploymentTarget.computeMinimumDeploymentTarget(of: macOSPackageDescriptionPath, platform: .macOS))?.versionString ?? "10.15"
+            }
+            cmd += ["-target", "\(triple.tripleString(forPlatformVersion: version))"]
             #endif
 
-            cmd += compilerFlags
+            // Add any extra flags required as indicated by the ManifestLoader.
+            cmd += resources.swiftCompilerFlags
+
+            cmd += self.interpreterFlags(for: toolsVersion)
             if let moduleCachePath = moduleCachePath {
-                cmd += ["-module-cache-path", moduleCachePath]
+                cmd += ["-module-cache-path", moduleCachePath.pathString]
             }
 
             // Add the arguments for emitting serialized diagnostics, if requested.
-            if serializedDiagnostics, cacheDir != nil {
-                let diaDir = cacheDir.appending(component: "ManifestLoading")
-                let diagnosticFile = diaDir.appending(component: packageIdentity + ".dia")
+            if self.serializedDiagnostics, let databaseCacheDir = self.databaseCacheDir {
+                let diaDir = databaseCacheDir.appending(component: "ManifestLoading")
+                let diagnosticFile = diaDir.appending(component: "\(packageIdentity).dia")
                 try localFileSystem.createDirectory(diaDir, recursive: true)
                 cmd += ["-Xfrontend", "-serialize-diagnostics-path", "-Xfrontend", diagnosticFile.pathString]
                 manifestParseResult.diagnosticFile = diagnosticFile
@@ -610,9 +796,16 @@ public final class ManifestLoader: ManifestLoaderProtocol {
 
             cmd += [manifestPath.pathString]
 
+            cmd += self.extraManifestFlags
+
             try withTemporaryDirectory(removeTreeOnDeinit: true) { tmpDir in
                 // Set path to compiled manifest executable.
-                let compiledManifestFile = tmpDir.appending(component: "\(packageIdentity)-manifest")
+#if os(Windows)
+                let executableSuffix = ".exe"
+#else
+                let executableSuffix = ""
+#endif
+                let compiledManifestFile = tmpDir.appending(component: "\(packageIdentity)-manifest\(executableSuffix)")
                 cmd += ["-o", compiledManifestFile.pathString]
 
                 // Compile the manifest.
@@ -624,30 +817,38 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                 if compilerResult.exitStatus != .terminated(code: 0) {
                     return
                 }
-                
+
                 // Pass an open file descriptor of a file to which the JSON representation of the manifest will be written.
                 let jsonOutputFile = tmpDir.appending(component: "\(packageIdentity)-output.json")
                 guard let jsonOutputFileDesc = fopen(jsonOutputFile.pathString, "w") else {
                     throw StringError("couldn't create the manifest's JSON output file")
                 }
-                cmd = [compiledManifestFile.pathString, "-fileno", "\(fileno(jsonOutputFileDesc))"]
 
-              #if os(macOS)
-                // If enabled, use sandbox-exec on macOS. This provides some safety against
-                // arbitrary code execution when parsing manifest files. We only allow
-                // the permissions which are absolutely necessary for manifest parsing.
+                cmd = [compiledManifestFile.pathString]
+#if os(Windows)
+                // NOTE: `_get_osfhandle` returns a non-owning, unsafe,
+                // unretained HANDLE.  DO NOT invoke `CloseHandle` on `hFile`.
+                let hFile: Int = _get_osfhandle(_fileno(jsonOutputFileDesc))
+                cmd += ["-handle", "\(String(hFile, radix: 16))"]
+#else
+                cmd += ["-fileno", "\(fileno(jsonOutputFileDesc))"]
+#endif
+                // If enabled, run command in a sandbox.
+                // This provides some safety against arbitrary code execution when parsing manifest files.
+                // We only allow the permissions which are absolutely necessary.
                 if isManifestSandboxEnabled {
-                    let cacheDirectories = [
-                        cacheDir,
-                        moduleCachePath.map({ AbsolutePath($0) })
-                    ].compactMap({ $0 })
-                    let profile = sandboxProfile(toolsVersion: toolsVersion, cacheDirectories: cacheDirectories)
-                    cmd += ["sandbox-exec", "-p", profile]
+                    let cacheDirectories = [self.databaseCacheDir, moduleCachePath].compactMap{ $0 }
+                    let strictness: Sandbox.Strictness = toolsVersion < .v5_3 ? .manifest_pre_53 : .default
+                    cmd = Sandbox.apply(command: cmd, writableDirectories: cacheDirectories, strictness: strictness)
                 }
-              #endif
 
                 // Run the compiled manifest.
-                let runResult = try Process.popen(arguments: cmd)
+                var environment = ProcessEnv.vars
+#if os(Windows)
+                let windowsPathComponent = runtimePath.pathString.replacingOccurrences(of: "/", with: "\\")
+                environment["Path"] = "\(windowsPathComponent);\(environment["Path"] ?? "")"
+#endif
+                let runResult = try Process.popen(arguments: cmd, environment: environment)
                 fclose(jsonOutputFileDesc)
                 let runOutput = try (runResult.utf8Output() + runResult.utf8stderrOutput()).spm_chuzzle()
                 if let runOutput = runOutput {
@@ -671,21 +872,20 @@ public final class ManifestLoader: ManifestLoaderProtocol {
 
         var manifestParseResult = ManifestParseResult()
         do {
-            switch pathOrContents {
-            case .path(let path):
+            if localFileSystem.isFile(manifestPath) {
                 try _parse(
-                    path: path,
+                    path: manifestPath,
                     toolsVersion: toolsVersion,
                     manifestParseResult: &manifestParseResult
                 )
-            case .contents(let contents):
+            } else {
                 try withTemporaryFile(suffix: ".swift") { tempFile in
-                  try localFileSystem.writeFileContents(tempFile.path, bytes: ByteString(contents))
-                  try _parse(
-                      path: tempFile.path,
-                      toolsVersion: toolsVersion,
-                      manifestParseResult: &manifestParseResult
-                  )
+                    try localFileSystem.writeFileContents(tempFile.path, bytes: ByteString(manifestContents))
+                    try _parse(
+                        path: tempFile.path,
+                        toolsVersion: toolsVersion,
+                        manifestParseResult: &manifestParseResult
+                    )
                 }
             }
         } catch {
@@ -698,24 +898,25 @@ public final class ManifestLoader: ManifestLoaderProtocol {
 
     /// Returns path to the sdk, if possible.
     private func sdkRoot() -> AbsolutePath? {
-        if let sdkRoot = _sdkRoot {
+        if let sdkRoot = self.sdkRootCache.get() {
             return sdkRoot
         }
 
+        var sdkRootPath: AbsolutePath? = nil
         // Find SDKROOT on macOS using xcrun.
-      #if os(macOS)
+        #if os(macOS)
         let foundPath = try? Process.checkNonZeroExit(
             args: "/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path")
         guard let sdkRoot = foundPath?.spm_chomp(), !sdkRoot.isEmpty else {
             return nil
         }
-        _sdkRoot = AbsolutePath(sdkRoot)
-      #endif
+        let path = AbsolutePath(sdkRoot)
+        sdkRootPath = path
+        self.sdkRootCache.put(path)
+        #endif
 
-        return _sdkRoot
+        return sdkRootPath
     }
-    // Cache storage for computed sdk path.
-    private var _sdkRoot: AbsolutePath? = nil
 
     /// Returns the interpreter flags for a manifest.
     public func interpreterFlags(
@@ -737,282 +938,27 @@ public final class ManifestLoader: ManifestLoaderProtocol {
     /// Returns the runtime path given the manifest version and path to libDir.
     private func runtimePath(for version: ToolsVersion) -> AbsolutePath {
         // Bin dir will be set when developing swiftpm without building all of the runtimes.
-        return resources.binDir ?? resources.libDir.appending(version.runtimeSubpath)
+        return resources.binDir ?? resources.libDir.appending(component: "ManifestAPI")
     }
 
-    /// Returns the build engine.
-    private func getEngine() throws -> LLBuildEngine {
-        if let engine = _engine {
-            return engine
-        }
-
-        let cacheDelegate = ManifestCacheDelegate()
-        let engine = LLBuildEngine(delegate: cacheDelegate)
-        cacheDelegate.loader = self
-
-        if isManifestCachingEnabled {
-            try localFileSystem.createDirectory(cacheDir, recursive: true)
-            try engine.attachDB(path: cacheDir.appending(component: "manifest.db").pathString)
-        }
-        _engine = engine
-        return engine
-    }
-    private var _engine: LLBuildEngine?
-}
-
-/// Returns the sandbox profile to be used when parsing manifest on macOS.
-private func sandboxProfile(toolsVersion: ToolsVersion, cacheDirectories: [AbsolutePath] = []) -> String {
-    let stream = BufferedOutputByteStream()
-    stream <<< "(version 1)" <<< "\n"
-    // Deny everything by default.
-    stream <<< "(deny default)" <<< "\n"
-    // Import the system sandbox profile.
-    stream <<< "(import \"system.sb\")" <<< "\n"
-
-    // The following accesses are only needed when interpreting the manifest (versus running a compiled version).
-    if toolsVersion < .v5_3 {
-        // Allow reading all files.
-        stream <<< "(allow file-read*)" <<< "\n"
-        // These are required by the Swift compiler.
-        stream <<< "(allow process*)" <<< "\n"
-        stream <<< "(allow sysctl*)" <<< "\n"
-        // Allow writing in temporary locations.
-        stream <<< "(allow file-write*" <<< "\n"
-        for directory in Platform.darwinCacheDirectories() {
-            stream <<< "    (regex #\"^\(directory.pathString)/org\\.llvm\\.clang.*\")" <<< "\n"
-        }
-        for directory in cacheDirectories {
-            stream <<< "    (subpath \"\(directory.pathString)\")" <<< "\n"
-        }
+    /// Returns path to the manifest database inside the given cache directory.
+    private static func manifestCacheDBPath(_ cacheDir: AbsolutePath) -> AbsolutePath {
+        return cacheDir.appending(component: "manifest.db")
     }
 
-    stream <<< ")" <<< "\n"
-    return stream.bytes.description
-}
+    /// reset internal cache
+    public func resetCache() throws {
+        // nothing needed at this point
+    }
 
-// MARK:- Caching support.
-
-final class ManifestCacheDelegate: LLBuildEngineDelegate {
-
-    weak var loader: ManifestLoader!
-
-    func lookupRule(rule: String, key: Key) -> Rule {
-        switch rule {
-        case ManifestLoadRule.ruleName:
-            return ManifestLoadRule(key, loader: loader)
-        case FileInfoRule.ruleName:
-            return FileInfoRule(key)
-        case SwiftPMVersionRule.ruleName:
-            return SwiftPMVersionRule()
-        case ProcessEnvRule.ruleName:
-            return ProcessEnvRule()
-        default:
-            fatalError("Unknown rule \(rule)")
+    /// reset internal state and purge shared cache
+    public func purgeCache() throws {
+        try self.resetCache()
+        if let manifestCacheDBPath = self.databaseCacheDir.flatMap({ Self.manifestCacheDBPath($0) }) {
+            try localFileSystem.removeFileTree(manifestCacheDBPath)
         }
     }
 }
-
-/// A rule to load a package manifest.
-///
-/// The rule can currently only load manifests which are physically present on
-/// the local file system. The rule will re-run if the manifest is modified.
-final class ManifestLoadRule: LLBuildRule {
-
-    fileprivate struct RuleKey: LLBuildKey {
-        typealias BuildValue = ManifestLoader.ManifestParseResult
-        typealias BuildRule = ManifestLoadRule
-
-        let packageIdentity: String
-        let pathOrContents: ManifestPathOrContents
-        let toolsVersion: ToolsVersion
-    }
-
-    override class var ruleName: String { return "\(ManifestLoadRule.self)" }
-
-    private let key: RuleKey
-    private weak var loader: ManifestLoader!
-
-    init(_ key: Key, loader: ManifestLoader) {
-        self.key = RuleKey(key)
-        self.loader = loader
-        super.init()
-    }
-
-    override func start(_ engine: LLTaskBuildEngine) {
-        // FIXME: Ideally, we should expose an API in the manifest file to track individual
-        // environment variables instead of blindly invalidating when *anything* changes.
-        engine.taskNeedsInput(ProcessEnvRule.RuleKey(), inputID: 1)
-
-        engine.taskNeedsInput(SwiftPMVersionRule.RuleKey(), inputID: 2)
-        if case .path(let path) = key.pathOrContents {
-            engine.taskNeedsInput(FileInfoRule.RuleKey(path: path), inputID: 3)
-        }
-    }
-
-    override func isResultValid(_ priorValue: Value) -> Bool {
-        // Always rebuild if we had a failure.
-        do {
-            let value = try RuleKey.BuildValue(priorValue)
-            if value.hasErrors { return false }
-        } catch {
-            return false
-        }
-
-        return super.isResultValid(priorValue)
-    }
-
-    override func inputsAvailable(_ engine: LLTaskBuildEngine) {
-        let value = loader.parse(
-            packageIdentity: key.packageIdentity,
-            pathOrContents: key.pathOrContents, toolsVersion: key.toolsVersion)
-        engine.taskIsComplete(value)
-    }
-}
-
-// FIXME: Find a proper place for this rule.
-/// A rule to compute the current process environment.
-///
-/// This rule will always run.
-final class ProcessEnvRule: LLBuildRule {
-
-    struct RuleKey: LLBuildKey {
-        typealias BuildValue = RuleValue
-        typealias BuildRule = ProcessEnvRule
-    }
-
-    struct RuleValue: LLBuildValue, Equatable {
-        let env: [String: String]
-    }
-
-    override class var ruleName: String { return "\(ProcessEnvRule.self)" }
-
-    override func isResultValid(_ priorValue: Value) -> Bool {
-        // Always rebuild this rule.
-        return false
-    }
-
-    override func inputsAvailable(_ engine: LLTaskBuildEngine) {
-        let env = ProcessInfo.processInfo.environment
-        engine.taskIsComplete(RuleValue(env: env))
-    }
-}
-
-// FIXME: Find a proper place for this rule.
-/// A rule to get file info of a file on disk.
-final class FileInfoRule: LLBuildRule {
-
-    struct RuleKey: LLBuildKey {
-        typealias BuildValue = RuleValue
-        typealias BuildRule = FileInfoRule
-
-        let path: AbsolutePath
-    }
-
-    typealias RuleValue = CodableResult<TSCBasic.FileInfo, StringError>
-
-    override class var ruleName: String { return "\(FileInfoRule.self)" }
-
-    private let key: RuleKey
-
-    init(_ key: Key) {
-        self.key = RuleKey(key)
-        super.init()
-    }
-
-    override func isResultValid(_ priorValue: Value) -> Bool {
-        let priorValue = try? RuleValue(priorValue)
-
-        // Always rebuild if we had a failure.
-        if case .failure = priorValue?.result {
-            return false
-        }
-        return getFileInfo(key.path).result == priorValue?.result
-    }
-
-    override func inputsAvailable(_ engine: LLTaskBuildEngine) {
-        engine.taskIsComplete(getFileInfo(key.path))
-    }
-
-    private func getFileInfo(_ path: AbsolutePath) -> RuleValue {
-        return RuleValue(body: {
-            try localFileSystem.getFileInfo(key.path)
-        })
-    }
-}
-
-// FIXME: Find a proper place for this rule.
-/// A rule to compute the current version of the pacakge manager.
-///
-/// This rule will always run.
-final class SwiftPMVersionRule: LLBuildRule {
-
-    struct RuleKey: LLBuildKey {
-        typealias BuildValue = RuleValue
-        typealias BuildRule = SwiftPMVersionRule
-    }
-
-    struct RuleValue: LLBuildValue, Equatable {
-        let version: String
-    }
-
-    override class var ruleName: String { return "\(SwiftPMVersionRule.self)" }
-
-    override func isResultValid(_ priorValue: Value) -> Bool {
-        // Always rebuild this rule.
-        return false
-    }
-
-    override func inputsAvailable(_ engine: LLTaskBuildEngine) {
-        // FIXME: We need to include git hash in the version
-        // string to make this rule more correct.
-        let version = Versioning.currentVersion.displayString
-        engine.taskIsComplete(RuleValue(version: version))
-    }
-}
-
-/// Enum to represent either the manifest path or its content.
-private enum ManifestPathOrContents {
-    case path(AbsolutePath)
-    case contents([UInt8])
-}
-
-extension ManifestPathOrContents: Codable {
-    private enum CodingKeys: String, CodingKey {
-        case path
-        case contents
-    }
-
-    init(from decoder: Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        guard let key = values.allKeys.first(where: values.contains) else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Did not find a matching key"))
-        }
-        switch key {
-        case .path:
-            var unkeyedValues = try values.nestedUnkeyedContainer(forKey: key)
-            let a1 = try unkeyedValues.decode(AbsolutePath.self)
-            self = .path(a1)
-        case .contents:
-            var unkeyedValues = try values.nestedUnkeyedContainer(forKey: key)
-            let a1 = try unkeyedValues.decode([UInt8].self)
-            self = .contents(a1)
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        switch self {
-        case let .path(a1):
-            var unkeyedContainer = container.nestedUnkeyedContainer(forKey: .path)
-            try unkeyedContainer.encode(a1)
-        case let .contents(a1):
-            var unkeyedContainer = container.nestedUnkeyedContainer(forKey: .contents)
-            try unkeyedContainer.encode(a1)
-        }
-    }
-}
-
-extension CodableResult: LLBuildValue { }
 
 extension TSCBasic.Diagnostic.Message {
     static func duplicateTargetName(targetName: String) -> Self {
@@ -1023,15 +969,15 @@ extension TSCBasic.Diagnostic.Message {
         .error("product '\(productName)' doesn't reference any targets")
     }
 
-    static func productTargetNotFound(productName: String, targetName: String) -> Self {
-        .error("target '\(targetName)' referenced in product '\(productName)' could not be found")
+    static func productTargetNotFound(productName: String, targetName: String, validTargets: [String]) -> Self {
+        .error("target '\(targetName)' referenced in product '\(productName)' could not be found; valid targets are: '\(validTargets.joined(separator: "', '"))'")
     }
 
     static func invalidBinaryProductType(productName: String) -> Self {
         .error("invalid type for binary product '\(productName)'; products referencing only binary targets must have a type of 'library'")
     }
 
-    static func duplicateDependency(dependencyIdentity: String) -> Self {
+    static func duplicateDependency(dependencyIdentity: PackageIdentity) -> Self {
         .error("duplicate dependency '\(dependencyIdentity)'")
     }
 
@@ -1039,12 +985,12 @@ extension TSCBasic.Diagnostic.Message {
         .error("duplicate dependency named '\(dependencyName)'; consider differentiating them using the 'name' argument")
     }
 
-    static func unknownTargetDependency(dependency: String, targetName: String) -> Self {
-        .error("unknown dependency '\(dependency)' in target '\(targetName)'")
+    static func unknownTargetDependency(dependency: String, targetName: String, validDependencies: [String]) -> Self {
+        .error("unknown dependency '\(dependency)' in target '\(targetName)'; valid dependencies are: '\(validDependencies.joined(separator: "', '"))'")
     }
 
-    static func unknownTargetPackageDependency(packageName: String, targetName: String) -> Self {
-        .error("unknown package '\(packageName)' in dependencies of target '\(targetName)'")
+    static func unknownTargetPackageDependency(packageName: String, targetName: String, validPackages: [String]) -> Self {
+        .error("unknown package '\(packageName)' in dependencies of target '\(targetName)'; valid packages are: '\(validPackages.joined(separator: "', '"))'")
     }
 
     static func invalidBinaryLocation(targetName: String) -> Self {
@@ -1052,11 +998,11 @@ extension TSCBasic.Diagnostic.Message {
     }
 
     static func invalidBinaryURLScheme(targetName: String, validSchemes: [String]) -> Self {
-        .error("invalid URL scheme for binary target '\(targetName)'; valid schemes are: \(validSchemes.joined(separator: ", "))")
+        .error("invalid URL scheme for binary target '\(targetName)'; valid schemes are: '\(validSchemes.joined(separator: "', '"))'")
     }
 
     static func unsupportedBinaryLocationExtension(targetName: String, validExtensions: [String]) -> Self {
-        .error("unsupported extension for binary target '\(targetName)'; valid extensions are: \(validExtensions.joined(separator: ", "))")
+        .error("unsupported extension for binary target '\(targetName)'; valid extensions are: '\(validExtensions.joined(separator: "', '"))'")
     }
 
     static func invalidLanguageTag(_ languageTag: String) -> Self {

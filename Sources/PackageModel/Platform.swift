@@ -8,31 +8,6 @@
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 */
 
-/// A registry for available platforms.
-public final class PlatformRegistry {
-
-    /// The current registery is hardcoded and static so we can just use
-    /// a singleton for now.
-    public static let `default`: PlatformRegistry = .init()
-
-    /// The list of known platforms.
-    public let knownPlatforms: [Platform]
-
-    /// The mapping of platforms to their name. 
-    public let platformByName: [String: Platform]
-
-    /// Create a registry with the given list of platforms.
-    init(platforms: [Platform] = PlatformRegistry._knownPlatforms) {
-        self.knownPlatforms = platforms
-        self.platformByName = Dictionary(uniqueKeysWithValues: knownPlatforms.map({ ($0.name, $0) }))
-    }
-
-    /// The static list of known platforms.
-    private static var _knownPlatforms: [Platform] {
-        return [.macOS, .iOS, .tvOS, .watchOS, .linux, .android, .wasi]
-    }
-}
-
 /// Represents a platform.
 public struct Platform: Equatable, Hashable, Codable {
     /// The name of the platform.
@@ -51,9 +26,11 @@ public struct Platform: Equatable, Hashable, Codable {
     }
     
     public static let macOS: Platform = Platform(name: "macos", oldestSupportedVersion: "10.10")
+    public static let macCatalyst: Platform = Platform(name: "maccatalyst", oldestSupportedVersion: "13.0")
     public static let iOS: Platform = Platform(name: "ios", oldestSupportedVersion: "9.0")
     public static let tvOS: Platform = Platform(name: "tvos", oldestSupportedVersion: "9.0")
     public static let watchOS: Platform = Platform(name: "watchos", oldestSupportedVersion: "2.0")
+    public static let driverKit: Platform = Platform(name: "driverkit", oldestSupportedVersion: "19.0")
     public static let linux: Platform = Platform(name: "linux", oldestSupportedVersion: .unknown)
     public static let android: Platform = Platform(name: "android", oldestSupportedVersion: .unknown)
     public static let windows: Platform = Platform(name: "windows", oldestSupportedVersion: .unknown)
@@ -61,8 +38,26 @@ public struct Platform: Equatable, Hashable, Codable {
 
 }
 
+/// Represents a platform supported by a target.
+public struct SupportedPlatform: Equatable, Codable {
+    /// The platform.
+    public let platform: Platform
+
+    /// The minimum required version for this platform.
+    public let version: PlatformVersion
+
+    /// The options declared by the platform.
+    public let options: [String]
+
+    public init(platform: Platform, version: PlatformVersion, options: [String] = []) {
+        self.platform = platform
+        self.version = version
+        self.options = options
+    }
+}
+
 /// Represents a platform version.
-public struct PlatformVersion: ExpressibleByStringLiteral, Comparable, Hashable, Codable {
+public struct PlatformVersion: Equatable, Hashable, Codable {
 
     /// The unknown platform version.
     public static let unknown: PlatformVersion = .init("0.0.0")
@@ -100,34 +95,16 @@ public struct PlatformVersion: ExpressibleByStringLiteral, Comparable, Hashable,
             fatalError("Unexpected number of components \(components)")
         }
     }
+}
 
-    // MARK:- ExpressibleByStringLiteral
-
-    public init(stringLiteral value: String) {
-        self.init(value)
-    }
-
-    // MARK:- Comparable
-
+extension PlatformVersion: Comparable {
     public static func < (lhs: PlatformVersion, rhs: PlatformVersion) -> Bool {
         return lhs.version < rhs.version
     }
 }
 
-/// Represents a platform supported by a target.
-public struct SupportedPlatform: Codable {
-    /// The platform.
-    public let platform: Platform
-
-    /// The minimum required version for this platform.
-    public let version: PlatformVersion
-
-    /// The options declared by the platform.
-    public let options: [String]
-
-    public init(platform: Platform, version: PlatformVersion, options: [String] = []) {
-        self.platform = platform
-        self.version = version
-        self.options = options
+extension PlatformVersion: ExpressibleByStringLiteral {
+    public init(stringLiteral value: String) {
+        self.init(value)
     }
 }

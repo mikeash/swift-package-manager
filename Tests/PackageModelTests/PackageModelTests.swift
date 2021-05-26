@@ -9,12 +9,27 @@
 */
 
 import XCTest
-
+import Basics
 import TSCBasic
-
 import PackageModel
 
 class PackageModelTests: XCTestCase {
+
+    func testLegacyIdentities() throws {
+        XCTAssertTrue(PackageModel._useLegacyIdentities)
+        
+        PackageModel._useLegacyIdentities = false
+        XCTAssertEqual(
+            PackageIdentity(url: "git@github.com/foo/bar/baz.git").description,
+            "github.com/foo/bar/baz"
+        )
+
+        PackageModel._useLegacyIdentities = true
+        XCTAssertEqual(
+            PackageIdentity(url: "git@github.com/foo/bar/baz.git").description,
+            "baz"
+        )
+    }
 
     func testProductTypeCodable() throws {
         struct Foo: Codable, Equatable {
@@ -24,8 +39,8 @@ class PackageModelTests: XCTestCase {
         func checkCodable(_ type: ProductType) {
             do {
                 let foo = Foo(type: type)
-                let data = try JSONEncoder().encode(foo)
-                let decodedFoo = try JSONDecoder().decode(Foo.self, from: data)
+                let data = try JSONEncoder.makeWithDefaults().encode(foo)
+                let decodedFoo = try JSONDecoder.makeWithDefaults().decode(Foo.self, from: data)
                 XCTAssertEqual(foo, decodedFoo)
             } catch {
                 XCTFail("\(error)")

@@ -13,7 +13,7 @@ import TSCBasic
 import TSCUtility
 import PackageModel
 import PackageGraph
-import Build
+import SPMBuildCore
 import XCBuildSupport
 import SPMTestSupport
 
@@ -23,7 +23,7 @@ class PIFBuilderTests: XCTestCase {
     let inputsDir = AbsolutePath(#file).parentDirectory.appending(components: "Inputs")
 
   #if os(macOS)
-    func testOrdering() {
+    func testOrdering() throws {
         // Repeat multiple times to detect non-deterministic shuffling due to sets.
         for _ in 0..<10 {
             let fs = InMemoryFileSystem(emptyFiles:
@@ -35,16 +35,16 @@ class PIFBuilderTests: XCTestCase {
             )
 
             let diagnostics = DiagnosticsEngine()
-            let graph = loadPackageGraph(
+            let graph = try loadPackageGraph(
                 fs: fs,
                 diagnostics: diagnostics,
                 manifests: [
                     Manifest.createManifest(
                         name: "B",
                         path: "/B",
-                        url: "/B",
-                        v: .v5_2,
                         packageKind: .remote,
+                        packageLocation: "/B",
+                        v: .v5_2,
                         products: [
                             .init(name: "bexe", type: .executable, targets: ["B1"]),
                             .init(name: "blib", type: .library(.static), targets: ["B2"]),
@@ -56,11 +56,11 @@ class PIFBuilderTests: XCTestCase {
                     Manifest.createManifest(
                         name: "A",
                         path: "/A",
-                        url: "/A",
-                        v: .v5_2,
                         packageKind: .root,
+                        packageLocation: "/A",
+                        v: .v5_2,
                         dependencies: [
-                            .init(name: "B", url: "/B", requirement: .branch("master")),
+                            .scm(name: "B", location: "/B", requirement: .branch("master")),
                         ],
                         products: [
                             .init(name: "alib", type: .library(.static), targets: ["A2"]),
@@ -75,7 +75,7 @@ class PIFBuilderTests: XCTestCase {
             )
 
             let builder = PIFBuilder(graph: graph, parameters: .mock(), diagnostics: diagnostics)
-            let pif = builder.construct()
+            let pif = try builder.construct()
 
             XCTAssertNoDiagnostics(diagnostics)
 
@@ -86,11 +86,20 @@ class PIFBuilderTests: XCTestCase {
             let targetAExeDependencies = pif.workspace.projects[0].targets[0].dependencies
             XCTAssertEqual(targetAExeDependencies.map{ $0.targetGUID }, ["PACKAGE-PRODUCT:blib", "PACKAGE-TARGET:A2", "PACKAGE-TARGET:A3"])
             let projectBTargetNames = pif.workspace.projects[1].targets.map({ $0.name })
+            #if ENABLE_TARGET_BASED_DEPENDENCY_RESOLUTION
             XCTAssertEqual(projectBTargetNames, ["blib", "B2"])
+            #else
+            XCTAssertEqual(projectBTargetNames, ["bexe", "blib", "B2"])
+            #endif
         }
     }
 
-    func testProject() {
+    func testProject() throws {
+        #if ENABLE_TARGET_BASED_DEPENDENCY_RESOLUTION
+        #else
+        try XCTSkipIf(true)
+        #endif
+
         let fs = InMemoryFileSystem(emptyFiles:
             "/Foo/Sources/foo/main.swift",
             "/Foo/Tests/FooTests/tests.swift",
@@ -98,19 +107,19 @@ class PIFBuilderTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "Foo",
-                    defaultLocalization: "fr",
                     path: "/Foo",
-                    url: "/Foo",
-                    v: .v5_2,
                     packageKind: .root,
+                    packageLocation: "/Foo",
+                    defaultLocalization: "fr",
+                    v: .v5_2,
                     dependencies: [
-                        .init(name: "Bar", url: "/Bar", requirement: .branch("master")),
+                        .scm(name: "Bar", location: "/Bar", requirement: .branch("master")),
                     ],
                     targets: [
                         .init(name: "foo", dependencies: [.product(name: "BarLib", package: "Bar")]),
@@ -118,18 +127,18 @@ class PIFBuilderTests: XCTestCase {
                     ]),
                 Manifest.createManifest(
                     name: "Bar",
+                    path: "/Bar",
+                    packageKind: .remote,
+                    packageLocation: "/Bar",
                     platforms: [
                         PlatformDescription(name: "macos", version: "10.14"),
                         PlatformDescription(name: "ios", version: "12"),
                         PlatformDescription(name: "tvos", version: "11"),
                         PlatformDescription(name: "watchos", version: "6"),
                     ],
-                    path: "/Bar",
-                    url: "/Bar",
                     v: .v5_2,
-                    packageKind: .remote,
                     products: [
-                        .init(name: "BarLib", targets: ["BarLib"]),
+                        .init(name: "BarLib", type: .library(.automatic), targets: ["BarLib"]),
                     ],
                     targets: [
                         .init(name: "BarLib"),
@@ -140,7 +149,7 @@ class PIFBuilderTests: XCTestCase {
         )
 
         let builder = PIFBuilder(graph: graph, parameters: .mock(), diagnostics: diagnostics)
-        let pif = builder.construct()
+        let pif = try builder.construct()
 
         XCTAssertNoDiagnostics(diagnostics)
 
@@ -356,7 +365,7 @@ class PIFBuilderTests: XCTestCase {
         }
     }
 
-    func testExecutableProducts() {
+    func testExecutableProducts() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Foo/Sources/foo/main.swift",
             "/Foo/Sources/cfoo/main.c",
@@ -368,19 +377,19 @@ class PIFBuilderTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "Foo",
                     path: "/Foo",
-                    url: "/Foo",
-                    v: .v5_2,
                     packageKind: .root,
+                    packageLocation: "/Foo",
+                    v: .v5_2,
                     swiftLanguageVersions: [.v4_2, .v5],
                     dependencies: [
-                        .init(name: "Bar", url: "/Bar", requirement: .branch("master")),
+                        .scm(name: "Bar", location: "/Bar", requirement: .branch("master")),
                     ],
                     targets: [
                         .init(name: "foo", dependencies: [
@@ -399,9 +408,9 @@ class PIFBuilderTests: XCTestCase {
                 Manifest.createManifest(
                     name: "Bar",
                     path: "/Bar",
-                    url: "/Bar",
-                    v: .v4_2,
                     packageKind: .remote,
+                    packageLocation: "/Bar",
+                    v: .v4_2,
                     cLanguageStandard: "c11",
                     cxxLanguageStandard: "c++14",
                     swiftLanguageVersions: [.v4_2],
@@ -421,7 +430,7 @@ class PIFBuilderTests: XCTestCase {
         var pif: PIF.TopLevelObject!
         try! withCustomEnv(["PKG_CONFIG_PATH": inputsDir.pathString]) {
             let builder = PIFBuilder(graph: graph, parameters: .mock(), diagnostics: diagnostics)
-            pif = builder.construct()
+            pif = try builder.construct()
         }
 
         XCTAssertNoDiagnostics(diagnostics)
@@ -675,7 +684,12 @@ class PIFBuilderTests: XCTestCase {
         }
     }
 
-    func testTestProducts() {
+    func testTestProducts() throws {
+        #if ENABLE_TARGET_BASED_DEPENDENCY_RESOLUTION
+        #else
+        try XCTSkipIf(true)
+        #endif
+
         let fs = InMemoryFileSystem(emptyFiles:
             "/Foo/Sources/FooTests/FooTests.swift",
             "/Foo/Sources/CFooTests/CFooTests.m",
@@ -689,19 +703,19 @@ class PIFBuilderTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "Foo",
                     path: "/Foo",
-                    url: "/Foo",
-                    v: .v5_2,
                     packageKind: .root,
+                    packageLocation: "/Foo",
+                    v: .v5_2,
                     swiftLanguageVersions: [.v4_2, .v5],
                     dependencies: [
-                        .init(name: "Bar", url: "/Bar", requirement: .branch("master")),
+                        .scm(name: "Bar", location: "/Bar", requirement: .branch("master")),
                     ],
                     targets: [
                         .init(name: "FooTests", dependencies: [
@@ -720,9 +734,9 @@ class PIFBuilderTests: XCTestCase {
                 Manifest.createManifest(
                     name: "Bar",
                     path: "/Bar",
-                    url: "/Bar",
-                    v: .v4_2,
                     packageKind: .remote,
+                    packageLocation: "/Bar",
+                    v: .v4_2,
                     cLanguageStandard: "c11",
                     cxxLanguageStandard: "c++14",
                     swiftLanguageVersions: [.v4_2],
@@ -743,7 +757,7 @@ class PIFBuilderTests: XCTestCase {
         var pif: PIF.TopLevelObject!
         try! withCustomEnv(["PKG_CONFIG_PATH": inputsDir.pathString]) {
             let builder = PIFBuilder(graph: graph, parameters: .mock(), diagnostics: diagnostics)
-            pif = builder.construct()
+            pif = try builder.construct()
         }
 
         XCTAssertNoDiagnostics(diagnostics)
@@ -908,7 +922,7 @@ class PIFBuilderTests: XCTestCase {
         }
     }
 
-    func testLibraryProducts() {
+    func testLibraryProducts() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Foo/Sources/FooLib1/lib.swift",
             "/Foo/Sources/FooLib2/lib.swift",
@@ -917,19 +931,19 @@ class PIFBuilderTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "Foo",
                     path: "/Foo",
-                    url: "/Foo",
-                    v: .v5_2,
                     packageKind: .root,
+                    packageLocation: "/Foo",
+                    v: .v5_2,
                     swiftLanguageVersions: [.v4_2, .v5],
                     dependencies: [
-                        .init(name: "Bar", url: "/Bar", requirement: .branch("master")),
+                        .scm(name: "Bar", location: "/Bar", requirement: .branch("master")),
                     ],
                     products: [
                         .init(name: "FooLib1", type: .library(.static), targets: ["FooLib1"]),
@@ -945,9 +959,9 @@ class PIFBuilderTests: XCTestCase {
                 Manifest.createManifest(
                     name: "Bar",
                     path: "/Bar",
-                    url: "/Bar",
-                    v: .v4_2,
                     packageKind: .remote,
+                    packageLocation: "/Bar",
+                    v: .v4_2,
                     cLanguageStandard: "c11",
                     cxxLanguageStandard: "c++14",
                     swiftLanguageVersions: [.v4_2],
@@ -963,7 +977,7 @@ class PIFBuilderTests: XCTestCase {
         var pif: PIF.TopLevelObject!
         try! withCustomEnv(["PKG_CONFIG_PATH": inputsDir.pathString]) {
             let builder = PIFBuilder(graph: graph, parameters: .mock(), diagnostics: diagnostics)
-            pif = builder.construct()
+            pif = try builder.construct()
         }
 
         XCTAssertNoDiagnostics(diagnostics)
@@ -1104,7 +1118,7 @@ class PIFBuilderTests: XCTestCase {
         }
     }
 
-    func testLibraryTargets() {
+    func testLibraryTargets() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Foo/Sources/FooLib1/lib.swift",
             "/Foo/Sources/FooLib2/lib.cpp",
@@ -1113,20 +1127,20 @@ class PIFBuilderTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "Foo",
                     path: "/Foo",
-                    url: "/Foo",
-                    v: .v5_2,
                     packageKind: .root,
+                    packageLocation: "/Foo",
+                    v: .v5_2,
                     cxxLanguageStandard: "c++14",
                     swiftLanguageVersions: [.v4_2, .v5],
                     dependencies: [
-                        .init(name: "Bar", url: "/Bar", requirement: .branch("master")),
+                        .scm(name: "Bar", location: "/Bar", requirement: .branch("master")),
                     ],
                     targets: [
                         .init(name: "FooLib1", dependencies: ["SystemLib", "FooLib2"]),
@@ -1138,9 +1152,9 @@ class PIFBuilderTests: XCTestCase {
                 Manifest.createManifest(
                     name: "Bar",
                     path: "/Bar",
-                    url: "/Bar",
-                    v: .v4_2,
                     packageKind: .remote,
+                    packageLocation: "/Bar",
+                    v: .v4_2,
                     cLanguageStandard: "c11",
                     swiftLanguageVersions: [.v4_2],
                     products: [
@@ -1155,7 +1169,7 @@ class PIFBuilderTests: XCTestCase {
         var pif: PIF.TopLevelObject!
         try! withCustomEnv(["PKG_CONFIG_PATH": inputsDir.pathString]) {
             let builder = PIFBuilder(graph: graph, parameters: .mock(), diagnostics: diagnostics)
-            pif = builder.construct()
+            pif = try builder.construct()
         }
 
         XCTAssertNoDiagnostics(diagnostics)
@@ -1397,23 +1411,120 @@ class PIFBuilderTests: XCTestCase {
         }
     }
 
-    func testSystemLibraryTargets() {
+    func testLibraryTargetsAsDylib() throws {
+        let fs = InMemoryFileSystem(emptyFiles:
+            "/Bar/Sources/BarLib/lib.c"
+        )
+
+        let diagnostics = DiagnosticsEngine()
+        let graph = try loadPackageGraph(
+            fs: fs,
+            diagnostics: diagnostics,
+            manifests: [
+                Manifest.createManifest(
+                    name: "Bar",
+                    path: "/Bar",
+                    packageKind: .root,
+                    packageLocation: "/Bar",
+                    v: .v4_2,
+                    cLanguageStandard: "c11",
+                    swiftLanguageVersions: [.v4_2],
+                    products: [
+                        .init(name: "BarLib", type: .library(.dynamic), targets: ["BarLib"]),
+                    ],
+                    targets: [
+                        .init(name: "BarLib"),
+                    ]),
+            ]
+        )
+
+        var pif: PIF.TopLevelObject!
+        try! withCustomEnv(["PKG_CONFIG_PATH": inputsDir.pathString]) {
+            let builder = PIFBuilder(graph: graph, parameters: .mock(shouldCreateDylibForDynamicProducts: true), diagnostics: diagnostics)
+            pif = try builder.construct()
+        }
+
+        XCTAssertNoDiagnostics(diagnostics)
+
+        PIFTester(pif) { workspace in
+            workspace.checkProject("PACKAGE:/Bar") { project in
+                project.checkTarget("PACKAGE-PRODUCT:BarLib") { target in
+                    XCTAssertEqual(target.name, "BarLib")
+                    XCTAssertEqual(target.productType, .dynamicLibrary)
+                    XCTAssertEqual(target.productName, "libBarLib.dylib")
+                }
+            }
+        }
+    }
+  
+    func testLibraryTargetWithModuleMap() throws {
+        let fs = InMemoryFileSystem(emptyFiles:
+            "/Bar/Sources/BarLib/lib.c",
+            "/Bar/Sources/BarLib/module.modulemap"
+        )
+        
+        let diagnostics = DiagnosticsEngine()
+        let graph = try loadPackageGraph(
+            fs: fs,
+            diagnostics: diagnostics,
+            manifests: [
+                Manifest.createManifest(
+                    name: "Bar",
+                    path: "/Bar",
+                    packageKind: .root,
+                    packageLocation: "/Bar",
+                    v: .v4_2,
+                    cLanguageStandard: "c11",
+                    swiftLanguageVersions: [.v4_2],
+                    products: [
+                        .init(name: "BarLib", type: .library(.dynamic), targets: ["BarLib"]),
+                    ],
+                    targets: [
+                        .init(name: "BarLib"),
+                    ]),
+            ]
+        )
+        
+        var pif: PIF.TopLevelObject!
+        try! withCustomEnv(["PKG_CONFIG_PATH": inputsDir.pathString]) {
+            let builder = PIFBuilder(graph: graph, parameters: .mock(shouldCreateDylibForDynamicProducts: true), diagnostics: diagnostics)
+            pif = try builder.construct()
+        }
+        
+        XCTAssertNoDiagnostics(diagnostics)
+        
+        PIFTester(pif) { workspace in
+            workspace.checkProject("PACKAGE:/Bar") { project in
+                project.checkTarget("PACKAGE-PRODUCT:BarLib") { target in
+                    XCTAssertEqual(target.name, "BarLib")
+                    
+                    target.checkBuildConfiguration("Debug") { configuration in
+                        configuration.checkBuildSettings { settings in
+                            XCTAssertNil(settings[.MODULEMAP_FILE_CONTENTS])
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func testSystemLibraryTargets() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Foo/Sources/SystemLib1/module.modulemap",
             "/Foo/Sources/SystemLib2/module.modulemap"
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "Foo",
                     path: "/Foo",
-                    url: "/Foo",
-                    v: .v5_2,
                     packageKind: .root,
+                    packageLocation: "/Foo",
+                    v: .v5_2,
                     cxxLanguageStandard: "c++14",
                     swiftLanguageVersions: [.v4_2, .v5],
                     targets: [
@@ -1426,7 +1537,7 @@ class PIFBuilderTests: XCTestCase {
         var pif: PIF.TopLevelObject!
         try! withCustomEnv(["PKG_CONFIG_PATH": inputsDir.pathString]) {
             let builder = PIFBuilder(graph: graph, parameters: .mock(), diagnostics: diagnostics)
-            pif = builder.construct()
+            pif = try builder.construct()
         }
 
         XCTAssertNoDiagnostics(diagnostics)
@@ -1508,7 +1619,7 @@ class PIFBuilderTests: XCTestCase {
         }
     }
 
-    func testBinaryTargets() {
+    func testBinaryTargets() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Foo/Sources/foo/main.swift",
             "/Foo/Sources/FooLib/lib.swift",
@@ -1517,16 +1628,16 @@ class PIFBuilderTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "Foo",
                     path: "/Foo",
-                    url: "/Foo",
-                    v: .v5_3,
                     packageKind: .root,
+                    packageLocation: "/Foo",
+                    v: .v5_3,
                     products: [
                         .init(name: "FooLib", type: .library(.automatic), targets: ["FooLib"]),
                     ],
@@ -1537,11 +1648,14 @@ class PIFBuilderTests: XCTestCase {
                         .init(name: "BinaryLibrary", path: "BinaryLibrary.xcframework", type: .binary)
                     ]),
             ],
+            binaryArtifacts: [
+                .init(kind: .xcframework, originURL: nil, path: AbsolutePath("/Foo/BinaryLibrary.xcframework"))
+            ],
             shouldCreateMultipleTestProducts: true
         )
 
         let builder = PIFBuilder(graph: graph, parameters: .mock(), diagnostics: diagnostics)
-        let pif = builder.construct()
+        let pif = try builder.construct()
 
         XCTAssertNoDiagnostics(diagnostics)
 
@@ -1566,7 +1680,7 @@ class PIFBuilderTests: XCTestCase {
         }
     }
 
-    func testResources() {
+    func testResources() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Foo/Sources/foo/main.swift",
             "/Foo/Sources/foo/Resources/Data.plist",
@@ -1580,22 +1694,23 @@ class PIFBuilderTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "Foo",
                     path: "/Foo",
-                    url: "/Foo",
-                    v: .v5_3,
                     packageKind: .root,
+                    packageLocation: "/Foo",
+                    v: .v5_3,
                     products: [
                         .init(name: "FooLib", type: .library(.automatic), targets: ["FooLib"]),
                     ],
                     targets: [
                         .init(name: "foo", resources: [
-                            .init(rule: .process, path: "Resources")
+                            // This is intentionally specific to test that we pick up `.xcdatamodel` implicitly.
+                            .init(rule: .process, path: "Resources/Data.plist")
                         ]),
                         .init(name: "FooLib", resources: [
                             .init(rule: .process, path: "Resources")
@@ -1605,11 +1720,12 @@ class PIFBuilderTests: XCTestCase {
                         ], type: .test),
                     ]),
             ],
-            shouldCreateMultipleTestProducts: true
+            shouldCreateMultipleTestProducts: true,
+            useXCBuildFileRules: true
         )
 
         let builder = PIFBuilder(graph: graph, parameters: .mock(), diagnostics: diagnostics)
-        let pif = builder.construct()
+        let pif = try builder.construct()
 
         XCTAssertNoDiagnostics(diagnostics)
 
@@ -1780,7 +1896,7 @@ class PIFBuilderTests: XCTestCase {
         }
     }
 
-    func testBuildSettings() {
+    func testBuildSettings() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Foo/Sources/foo/main.swift",
             "/Foo/Sources/FooLib/lib.swift",
@@ -1788,16 +1904,16 @@ class PIFBuilderTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "Foo",
                     path: "/Foo",
-                    url: "/Foo",
-                    v: .v5,
                     packageKind: .root,
+                    packageLocation: "/Foo",
+                    v: .v5,
                     products: [
                         .init(name: "FooLib", type: .library(.automatic), targets: ["FooLib"]),
                     ],
@@ -1871,7 +1987,7 @@ class PIFBuilderTests: XCTestCase {
         )
 
         let builder = PIFBuilder(graph: graph, parameters: .mock(), diagnostics: diagnostics)
-        let pif = builder.construct()
+        let pif = try builder.construct()
 
         XCTAssertNoDiagnostics(diagnostics)
 
@@ -1999,7 +2115,7 @@ class PIFBuilderTests: XCTestCase {
         }
     }
 
-    func testConditionalDependencies() {
+    func testConditionalDependencies() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Foo/Sources/foo/main.swift",
             "/Foo/Sources/FooLib1/lib.swift",
@@ -2008,16 +2124,16 @@ class PIFBuilderTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "Foo",
                     path: "/Foo",
-                    url: "/Foo",
-                    v: .v5_3,
                     packageKind: .root,
+                    packageLocation: "/Foo",
+                    v: .v5_3,
                     targets: [
                         .init(name: "foo", dependencies: [
                             .target(name: "FooLib1", condition: .init(platformNames: ["macos"])),
@@ -2036,7 +2152,7 @@ class PIFBuilderTests: XCTestCase {
             graph: graph,
             parameters: .mock(),
             diagnostics: diagnostics)
-        let pif = builder.construct()
+        let pif = try builder.construct()
 
         let expectedFilters: [PIF.GUID: [PIF.PlatformFilter]] = [
             "PACKAGE-TARGET:FooLib1": PIF.PlatformFilter.macOSFilters,
@@ -2067,25 +2183,25 @@ class PIFBuilderTests: XCTestCase {
         }
     }
 
-    func testSDKOptions() {
+    func testSDKOptions() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Foo/Sources/foo/main.swift"
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "Foo",
+                    path: "/Foo",
+                    packageKind: .root,
+                    packageLocation: "/Foo",
                     platforms: [
                         PlatformDescription(name: "macos", version: "10.14", options: ["best"]),
                     ],
-                    path: "/Foo",
-                    url: "/Foo",
                     v: .v5_3,
-                    packageKind: .root,
                     targets: [
                         .init(name: "foo", dependencies: []),
                     ]),
@@ -2094,7 +2210,7 @@ class PIFBuilderTests: XCTestCase {
         )
 
         let builder = PIFBuilder(graph: graph, parameters: .mock(), diagnostics: diagnostics)
-        let pif = builder.construct()
+        let pif = try builder.construct()
 
         XCTAssertNoDiagnostics(diagnostics)
 
@@ -2116,6 +2232,7 @@ extension PIFBuilderParameters {
         shouldCreateDylibForDynamicProducts: Bool = false
     ) -> Self {
         PIFBuilderParameters(
+            enableTestability: false,
             shouldCreateDylibForDynamicProducts: shouldCreateDylibForDynamicProducts
         )
     }

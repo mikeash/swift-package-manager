@@ -6,7 +6,7 @@
 
  See http://swift.org/LICENSE.txt for license information
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
-*/
+ */
 
 import XCTest
 
@@ -32,7 +32,6 @@ public func XCTAssertBuilds(
 ) {
     for conf in configurations {
         do {
-            print("    Building \(conf)")
             _ = try executeSwiftBuild(
                 path,
                 configuration: conf,
@@ -40,14 +39,15 @@ public func XCTAssertBuilds(
                 Xcc: Xcc,
                 Xld: Xld,
                 Xswiftc: Xswiftc,
-                env: env)
+                env: env
+            )
         } catch {
             XCTFail("""
-                `swift build -c \(conf)' failed:
-                
-                \(error)
-                
-                """, file: file, line: line)
+            `swift build -c \(conf)' failed:
+
+            \(error)
+
+            """, file: file, line: line)
         }
     }
 }
@@ -62,11 +62,11 @@ public func XCTAssertSwiftTest(
         _ = try SwiftPMProduct.SwiftTest.execute([], packagePath: path, env: env)
     } catch {
         XCTFail("""
-            `swift test' failed:
+        `swift test' failed:
 
-            \(error)
+        \(error)
 
-            """, file: file, line: line)
+        """, file: file, line: line)
     }
 }
 
@@ -94,4 +94,18 @@ public func XCTAssertBuildFails(
     } catch {
         XCTFail("`swift build' failed in an unexpected manner")
     }
+}
+
+public func XCTAssertEqual<T: CustomStringConvertible>(
+    _ assignment: [(container: T, version: Version)],
+    _ expected: [T: Version],
+    file: StaticString = #file, line: UInt = #line
+)
+    where T: Hashable
+{
+    var actual = [T: Version]()
+    for (identifier, binding) in assignment {
+        actual[identifier] = binding
+    }
+    XCTAssertEqual(actual, expected, file: file, line: line)
 }

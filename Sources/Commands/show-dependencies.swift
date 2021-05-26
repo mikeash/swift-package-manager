@@ -10,6 +10,7 @@
 
 import TSCBasic
 import PackageModel
+import PackageGraph
 
 public func dumpDependenciesOf(rootPackage: ResolvedPackage, mode: ShowDependenciesMode, on stream: OutputByteStream = stdoutStream) {
     let dumper: DependenciesDumper
@@ -43,7 +44,7 @@ private final class PlainTextDumper: DependenciesDumper {
 
                 let pkgVersion = package.manifest.version?.description ?? "unspecified"
 
-                stream <<< "\(hanger)\(package.name)<\(package.manifest.url)@\(pkgVersion)>\n"
+                stream <<< "\(hanger)\(package.identity.description)<\(package.manifest.packageLocation)@\(pkgVersion)>\n"
 
                 if !package.dependencies.isEmpty {
                     let replacement = (index == packages.count - 1) ?  "    " : "│   "
@@ -68,7 +69,7 @@ private final class FlatListDumper: DependenciesDumper {
     func dump(dependenciesOf rootpkg: ResolvedPackage, on stream: OutputByteStream) {
         func recursiveWalk(packages: [ResolvedPackage]) {
             for package in packages {
-                stream <<< package.name <<< "\n"
+                stream <<< package.identity.description <<< "\n"
                 if !package.dependencies.isEmpty {
                     recursiveWalk(packages: package.dependencies)
                 }
@@ -84,10 +85,10 @@ private final class DotDumper: DependenciesDumper {
     func dump(dependenciesOf rootpkg: ResolvedPackage, on stream: OutputByteStream) {
         var nodesAlreadyPrinted: Set<String> = []
         func printNode(_ package: ResolvedPackage) {
-            let url = package.manifest.url
+            let url = package.manifest.packageLocation
             if nodesAlreadyPrinted.contains(url) { return }
             let pkgVersion = package.manifest.version?.description ?? "unspecified"
-            stream <<< #""\#(url)" [label="\#(package.name)\n\#(url)\n\#(pkgVersion)"]"# <<< "\n"
+            stream <<< #""\#(url)" [label="\#(package.identity.description)\n\#(url)\n\#(pkgVersion)"]"# <<< "\n"
             nodesAlreadyPrinted.insert(url)
         }
         
@@ -99,8 +100,8 @@ private final class DotDumper: DependenciesDumper {
         func recursiveWalk(rootpkg: ResolvedPackage) {
             printNode(rootpkg)
             for dependency in rootpkg.dependencies {
-                let rootURL = rootpkg.manifest.url
-                let dependencyURL = dependency.manifest.url
+                let rootURL = rootpkg.manifest.packageLocation
+                let dependencyURL = dependency.manifest.packageLocation
                 let urlPair = DependencyURLs(root: rootURL, dependency: dependencyURL)
                 if dependenciesAlreadyPrinted.contains(urlPair) { continue }
                 
@@ -129,8 +130,8 @@ private final class JSONDumper: DependenciesDumper {
     func dump(dependenciesOf rootpkg: ResolvedPackage, on stream: OutputByteStream) {
         func convert(_ package: ResolvedPackage) -> JSON {
             return .orderedDictionary([
-                "name": .string(package.name),
-                "url": .string(package.manifest.url),
+                "name": .string(package.manifestName), // TODO: remove? add identity?
+                "url": .string(package.manifest.packageLocation),
                 "version": .string(package.manifest.version?.description ?? "unspecified"),
                 "path": .string(package.path.pathString),
                 "dependencies": .array(package.dependencies.map(convert)),
@@ -141,7 +142,7 @@ private final class JSONDumper: DependenciesDumper {
     }
 }
 
-public enum ShowDependenciesMode: CustomStringConvertible {
+public enum ShowDependenciesMode: String, RawRepresentable, CustomStringConvertible {
     case text, dot, json, flatlist
 
     public init?(rawValue: String) {

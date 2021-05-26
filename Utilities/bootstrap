@@ -3,7 +3,7 @@
 """
  This source file is part of the Swift.org open source project
 
- Copyright (c) 2014 - 2019 Apple Inc. and the Swift project authors
+ Copyright (c) 2014 - 2021 Apple Inc. and the Swift project authors
  Licensed under Apache License v2.0 with Runtime Library Exception
 
  See http://swift.org/LICENSE.txt for license information
@@ -120,9 +120,17 @@ def add_build_args(parser):
         action="store_true",
         help="enables building SwiftPM in release mode")
     parser.add_argument(
+        "--skip-cmake-bootstrap",
+        action="store_true",
+        help="build with prebuilt package manager in toolchain if it exists")
+    parser.add_argument(
         "--libswiftpm-install-dir",
         metavar='PATH',
         help="where to install libSwiftPM")
+    parser.add_argument(
+        "--libswiftpmdatamodel-install-dir",
+        metavar='PATH',
+        help="where to install libSwiftPMDataModel")
     parser.add_argument(
         "--prefix",
         dest="install_prefixes",
@@ -130,6 +138,11 @@ def add_build_args(parser):
         help="paths (relative to the project root) where to install build products [%(default)s]",
         default=["/tmp/swiftpm"],
         metavar="PATHS")
+    parser.add_argument(
+        "--cross-compile-hosts",
+        dest="cross_compile_hosts",
+        help="List of cross compile hosts targets.",
+        default=[])
 
 def add_test_args(parser):
     """Configures the parser with the arguments necessary for the test action."""
@@ -144,14 +157,21 @@ def add_test_args(parser):
         action="append",
         help="filter to apply on which tests to run",
         default=[])
+    parser.add_argument(
+        "--skip-integrated-driver-tests",
+        action="store_true",
+        help="whether to skip tests with the integrated driver",
+        default=True)
 
 def parse_global_args(args):
     """Parses and cleans arguments necessary for all actions."""
     args.build_dir = os.path.abspath(args.build_dir)
     args.project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    args.tsc_source_dir = os.path.join(args.project_root, "swift-tools-support-core")
+    args.tsc_source_dir = os.path.join(args.project_root, "..", "swift-tools-support-core")
     args.yams_source_dir = os.path.join(args.project_root, "..", "yams")
+    args.swift_argument_parser_source_dir = os.path.join(args.project_root, "..", "swift-argument-parser")
     args.swift_driver_source_dir = os.path.join(args.project_root, "..", "swift-driver")
+    args.swift_crypto_source_dir = os.path.join(args.project_root, "..", "swift-crypto")
     args.source_root = os.path.join(args.project_root, "Sources")
 
     if platform.system() == 'Darwin':
@@ -176,10 +196,15 @@ def parse_build_args(args):
     args.clang_path = get_clang_path(args)
     args.cmake_path = get_cmake_path(args)
     args.ninja_path = get_ninja_path(args)
-    args.target_dir = os.path.join(args.build_dir, get_build_target(args))
+    if args.cross_compile_hosts: # Use XCBuild target directory when building for multiple arches.
+        args.target_dir = os.path.join(args.build_dir, "apple/Products")
+    else:
+        args.target_dir = os.path.join(args.build_dir, get_build_target(args))
     args.bootstrap_dir = os.path.join(args.target_dir, "bootstrap")
     args.conf = 'release' if args.release else 'debug'
     args.bin_dir = os.path.join(args.target_dir, args.conf)
+    args.bootstrap = not args.skip_cmake_bootstrap or \
+                     not os.path.exists(os.path.join(os.path.split(args.swiftc_path)[0], "swift-build"))
 
 def parse_test_args(args):
     """Parses and cleans arguments necessary for the test action."""
@@ -278,9 +303,13 @@ def build(args):
     if not args.llbuild_build_dir:
         build_llbuild(args)
 
-    build_tsc(args)
-    build_yams(args)
-    build_swift_driver(args)
+    if args.bootstrap:
+        build_tsc(args)
+        build_yams(args)
+        build_swift_argument_parser(args)
+        build_swift_driver(args)
+        build_swift_crypto(args)
+
     build_swiftpm_with_cmake(args)
     build_swiftpm_with_swiftpm(args,integrated_swift_driver=False)
 
@@ -302,6 +331,9 @@ def test(args):
 
     # Test SwiftPM.
     call_swiftpm(args, cmd)
+
+    if args.skip_integrated_driver_tests:
+        return
 
     # Build SwiftPM with the integrated driver.
     note("Bootstrap with the integrated Swift driver")
@@ -326,11 +358,6 @@ def install(args):
 
     # Install libSwiftPM if an install directory was provided.
     if args.libswiftpm_install_dir:
-        dest = args.libswiftpm_install_dir
-
-        # FIXME: Don't hardcode the suffix.
-        install_binary(args, "libSwiftPM.dylib", dest)
-
         libswiftpm_modules = [
             "TSCLibc", "TSCBasic",
             "TSCUtility", "SourceControl",
@@ -339,22 +366,28 @@ def install(args):
             "PackageGraph", "SPMBuildCore", "Build",
             "Xcodeproj", "Workspace"
         ]
+        install_libswiftpm_dylib(args, "SwiftPM", args.libswiftpm_install_dir, libswiftpm_modules)
 
-        # Install the swiftmodule and swiftdoc files.
-        for module in libswiftpm_modules:
-            install_binary(args, module + ".swiftmodule", dest)
-            install_binary(args, module + ".swiftdoc", dest)
-
-        # Install the C headers.
-        tscclibc_include_dir = os.path.join(args.tsc_source_dir, "Sources/TSCclibc/include")
-        tscclibc_include_dir_dest = os.path.join(dest, "TSCclibc")
-        dir_util.copy_tree(tscclibc_include_dir, tscclibc_include_dir_dest)
+    # Install libSwiftPMDataModel if an install directory was provided.
+    if args.libswiftpmdatamodel_install_dir:
+        libswiftpmdatamodel_modules = [
+            "TSCLibc", "TSCBasic",
+            "TSCUtility", "SourceControl",
+            "PackageModel", "PackageLoading",
+            "PackageGraph", "SPMBuildCore",
+            "Xcodeproj", "Workspace"
+        ]
+        install_libswiftpm_dylib(args, "SwiftPMDataModel", args.libswiftpmdatamodel_install_dir, libswiftpmdatamodel_modules)
 
 def install_swiftpm(prefix, args):
-    # Install swiftpm binaries.
-    for binary in ["swift-build", "swift-test", "swift-run", "swift-package"]:
-        dest = os.path.join(prefix, "bin")
-        install_binary(args, binary, dest)
+    # Install swiftpm binary and create tool symlinks.
+    cli_tool_dest = os.path.join(prefix, "bin")
+    install_binary(args, "swift-package", cli_tool_dest)
+    for tool in ["swift-build", "swift-test", "swift-run", "swift-package-collection"]:
+        src = "swift-package"
+        dest = os.path.join(cli_tool_dest, tool)
+        note("Creating tool symlink from %s to %s" % (src, dest))
+        symlink_force(src, dest)
 
     if platform.system() == 'Darwin':
         dest = os.path.join(prefix, "libexec", "swift", "pm")
@@ -364,22 +397,53 @@ def install_swiftpm(prefix, args):
     runtime_lib_dest = os.path.join(prefix, "lib", "swift", "pm")
     runtime_lib_src = os.path.join(args.bootstrap_dir, "pm")
 
-    for runtime in ["4", "4_2"]:
-        files_to_install = ["libPackageDescription" + g_shared_lib_ext]
-        if platform.system() == 'Darwin':
-            files_to_install.append("PackageDescription.swiftinterface")
-        else:
-            files_to_install.append("PackageDescription.swiftmodule")
-            files_to_install.append("PackageDescription.swiftdoc")
+    files_to_install = ["libPackageDescription" + g_shared_lib_ext]
+    if platform.system() == 'Darwin':
+        files_to_install.append("PackageDescription.swiftinterface")
+    else:
+        files_to_install.append("PackageDescription.swiftmodule")
+    files_to_install.append("PackageDescription.swiftdoc")
 
-        for file in files_to_install:
-            src = os.path.join(runtime_lib_src, runtime, file)
-            dest = os.path.join(runtime_lib_dest, runtime, file)
-            mkdir_p(os.path.dirname(dest))
+    for file in files_to_install:
+        src = os.path.join(runtime_lib_src, "ManifestAPI", file)
+        dest = os.path.join(runtime_lib_dest, "ManifestAPI", file)
+        mkdir_p(os.path.dirname(dest))
 
-            note("Installing %s to %s" % (src, dest))
+        note("Installing %s to %s" % (src, dest))
 
-            file_util.copy_file(src, dest, update=1)
+        file_util.copy_file(src, dest, update=1)
+
+    files_to_install = ["libPackagePlugin" + g_shared_lib_ext]
+    if platform.system() == 'Darwin':
+        files_to_install.append("PackagePlugin.swiftinterface")
+    else:
+        files_to_install.append("PackagePlugin.swiftmodule")
+    files_to_install.append("PackagePlugin.swiftdoc")
+
+    for file in files_to_install:
+        src = os.path.join(runtime_lib_src, "PluginAPI", file)
+        dest = os.path.join(runtime_lib_dest, "PluginAPI", file)
+        mkdir_p(os.path.dirname(dest))
+
+        note("Installing %s to %s" % (src, dest))
+
+        file_util.copy_file(src, dest, update=1)
+
+
+def install_libswiftpm_dylib(args, library_name, install_dir, module_names):
+    # FIXME: Don't hardcode the prefix and suffix.
+    install_binary(args, "lib" + library_name + ".dylib", install_dir)
+
+    # Install the swiftmodule and swiftdoc files.
+    for module in module_names:
+        install_binary(args, module + ".swiftmodule", install_dir)
+        if not args.cross_compile_hosts: # When compiling for multiple arches, swiftdoc is part of the swiftmodule directory
+            install_binary(args, module + ".swiftdoc", install_dir)
+
+    # Install the C headers.
+    tscclibc_include_dir = os.path.join(args.tsc_source_dir, "Sources/TSCclibc/include")
+    tscclibc_include_dir_dest = os.path.join(install_dir, "TSCclibc")
+    dir_util.copy_tree(tscclibc_include_dir, tscclibc_include_dir_dest)
 
 
 def install_binary(args, binary, dest_dir):
@@ -389,19 +453,25 @@ def install_binary(args, binary, dest_dir):
     note("Installing %s to %s" % (src, dest))
 
     mkdir_p(os.path.dirname(dest))
-    file_util.copy_file(src, dest, update=1)
+    if os.path.isdir(src) and args.cross_compile_hosts: # Handle swiftmodule directories if compiling for multiple arches.
+        dir_util.copy_tree(src, dest)
+    else:
+        file_util.copy_file(src, dest, update=1)
 
 # -----------------------------------------------------------
 # Build functions
 # -----------------------------------------------------------
 
-def build_with_cmake(args, cmake_args, source_path, build_dir):
+def build_with_cmake(args, cmake_args, source_path, build_dir, targets=[]):
     """Runs CMake if needed, then builds with Ninja."""
     cache_path = os.path.join(build_dir, "CMakeCache.txt")
     if args.reconfigure or not os.path.isfile(cache_path) or not args.swiftc_path in open(cache_path).read():
         swift_flags = ""
         if args.sysroot:
             swift_flags = "-sdk %s" % args.sysroot
+
+        # Ensure we are not sharing the module cache with concurrent builds in CI
+        swift_flags += ' -module-cache-path "{}"'.format(os.path.join(build_dir, 'module-cache'))
 
         cmd = [
             args.cmake_path, "-G", "Ninja",
@@ -423,6 +493,8 @@ def build_with_cmake(args, cmake_args, source_path, build_dir):
     if args.verbose:
         ninja_cmd.append("-v")
 
+    ninja_cmd += targets
+
     call(ninja_cmd, cwd=build_dir, verbose=args.verbose)
 
 def build_llbuild(args):
@@ -442,6 +514,10 @@ def build_llbuild(args):
         "-DLLBUILD_SUPPORT_BINDINGS:=Swift",
     ]
 
+    # On Darwin, make sure we're building for the host architecture.
+    if platform.system() == 'Darwin':
+        flags.append("-DCMAKE_OSX_ARCHITECTURES:=%s" % (get_build_target(args).split('-')[0]))
+
     if args.sysroot:
         flags.append("-DSQLite3_INCLUDE_DIR=%s/usr/include" % args.sysroot)
 
@@ -454,10 +530,23 @@ def build_tsc(args):
 
     cmake_flags = []
     if platform.system() == 'Darwin':
-        cmake_flags.append("-DCMAKE_C_FLAGS=-target x86_64-apple-macosx%s" % g_macos_deployment_target)
+        cmake_flags.append("-DCMAKE_C_FLAGS=-target %s%s" % (get_build_target(args), g_macos_deployment_target))
         cmake_flags.append("-DCMAKE_OSX_DEPLOYMENT_TARGET=%s" % g_macos_deployment_target)
 
     build_with_cmake(args, cmake_flags, args.tsc_source_dir, args.tsc_build_dir)
+
+def build_swift_argument_parser(args):
+    note("Building swift-argument-parser")
+    args.swift_argument_parser_build_dir = os.path.join(args.target_dir, "swift-argument-parser")
+
+    cmake_flags = []
+    if platform.system() == 'Darwin':
+        cmake_flags.append("-DCMAKE_C_FLAGS=-target %s%s" % (get_build_target(args), g_macos_deployment_target))
+        cmake_flags.append("-DCMAKE_OSX_DEPLOYMENT_TARGET=%s" % g_macos_deployment_target)
+
+    cmake_flags.append("-DBUILD_TESTING=NO")
+    cmake_flags.append("-DBUILD_EXAMPLES=NO")
+    build_with_cmake(args, cmake_flags, args.swift_argument_parser_source_dir, args.swift_argument_parser_build_dir)
 
 def build_yams(args):
     note("Building Yams")
@@ -465,12 +554,9 @@ def build_yams(args):
 
     cmake_flags = []
     if platform.system() == 'Darwin':
-        cmake_flags.append("-DCMAKE_C_FLAGS=-target x86_64-apple-macosx%s" % g_macos_deployment_target)
+        cmake_flags.append("-DCMAKE_C_FLAGS=-target %s%s" % (get_build_target(args), g_macos_deployment_target))
         cmake_flags.append("-DCMAKE_OSX_DEPLOYMENT_TARGET=%s" % g_macos_deployment_target)
     else:
-        if args.dispatch_build_dir:
-            cmake_flags.append(get_dispatch_cmake_arg(args))
-
         if args.foundation_build_dir:
             cmake_flags.append(get_foundation_cmake_arg(args))
 
@@ -484,12 +570,24 @@ def build_swift_driver(args):
         get_llbuild_cmake_arg(args),
         "-DTSC_DIR=" + os.path.join(args.tsc_build_dir, "cmake/modules"),
         "-DYams_DIR=" + os.path.join(args.yams_build_dir, "cmake/modules"),
+        "-DArgumentParser_DIR=" + os.path.join(args.swift_argument_parser_build_dir, "cmake/modules"),
     ]
     if platform.system() == 'Darwin':
-        cmake_flags.append("-DCMAKE_C_FLAGS=-target x86_64-apple-macosx%s" % g_macos_deployment_target)
+        cmake_flags.append("-DCMAKE_C_FLAGS=-target %s%s" % (get_build_target(args), g_macos_deployment_target))
         cmake_flags.append("-DCMAKE_OSX_DEPLOYMENT_TARGET=%s" % g_macos_deployment_target)
 
     build_with_cmake(args, cmake_flags, args.swift_driver_source_dir, args.swift_driver_build_dir)
+    
+def build_swift_crypto(args):
+    note("Building SwiftCrypto")
+    args.swift_crypto_build_dir = os.path.join(args.target_dir, "swift-crypto")
+
+    cmake_flags = []
+    if platform.system() == 'Darwin':
+        cmake_flags.append("-DCMAKE_C_FLAGS=-target %s%s" % (get_build_target(args), g_macos_deployment_target))
+        cmake_flags.append("-DCMAKE_OSX_DEPLOYMENT_TARGET=%s" % g_macos_deployment_target)
+
+    build_with_cmake(args, cmake_flags, args.swift_crypto_source_dir, args.swift_crypto_build_dir)
 
 def add_rpath_for_cmake_build(args, rpath):
     "Adds the given rpath to the CMake-built swift-build"
@@ -502,37 +600,54 @@ def build_swiftpm_with_cmake(args):
     """Builds SwiftPM using CMake."""
     note("Building SwiftPM (with CMake)")
 
-    cmake_flags = [
-        get_llbuild_cmake_arg(args),
-        "-DTSC_DIR=" + os.path.join(args.tsc_build_dir, "cmake/modules"),
-        "-DYams_DIR=" + os.path.join(args.yams_build_dir, "cmake/modules"),
-        "-DSwiftDriver_DIR=" + os.path.join(args.swift_driver_build_dir, "cmake/modules"),
-    ]
+    if args.bootstrap:
+        cmake_flags = [
+            get_llbuild_cmake_arg(args),
+            "-DTSC_DIR=" + os.path.join(args.tsc_build_dir, "cmake/modules"),
+            "-DYams_DIR=" + os.path.join(args.yams_build_dir, "cmake/modules"),
+            "-DArgumentParser_DIR=" + os.path.join(args.swift_argument_parser_build_dir, "cmake/modules"),
+            "-DSwiftDriver_DIR=" + os.path.join(args.swift_driver_build_dir, "cmake/modules"),
+            "-DSwiftCrypto_DIR=" + os.path.join(args.swift_crypto_build_dir, "cmake/modules"),
+            "-DFIND_PM_DEPS:BOOL=YES",
+        ]
+    else:
+        cmake_flags = [ "-DFIND_PM_DEPS:BOOL=NO" ]
 
     if platform.system() == 'Darwin':
-        cmake_flags.append("-DCMAKE_C_FLAGS=-target x86_64-apple-macosx%s" % g_macos_deployment_target)
+        cmake_flags.append("-DCMAKE_C_FLAGS=-target %s%s" % (get_build_target(args), g_macos_deployment_target))
         cmake_flags.append("-DCMAKE_OSX_DEPLOYMENT_TARGET=%s" % g_macos_deployment_target)
 
-    build_with_cmake(args, cmake_flags, args.project_root, args.bootstrap_dir)
+    targets = [] if args.bootstrap else ["PD4", "PD4_2"]
+
+    build_with_cmake(args, cmake_flags, args.project_root, args.bootstrap_dir, targets)
 
     if args.llbuild_link_framework:
         add_rpath_for_cmake_build(args, args.llbuild_build_dir)
 
     if platform.system() == "Darwin":
         add_rpath_for_cmake_build(args, os.path.join(args.yams_build_dir, "lib"))
+        add_rpath_for_cmake_build(args, os.path.join(args.swift_argument_parser_build_dir, "lib"))
         add_rpath_for_cmake_build(args, os.path.join(args.swift_driver_build_dir, "lib"))
+        add_rpath_for_cmake_build(args, os.path.join(args.swift_crypto_build_dir, "lib"))
 
 def build_swiftpm_with_swiftpm(args, integrated_swift_driver):
     """Builds SwiftPM using the version of SwiftPM built with CMake."""
-    note("Building SwiftPM (with swift-build)")
 
     swiftpm_args = [
         "SWIFT_EXEC=" + args.swiftc_path,
         "SWIFT_DRIVER_SWIFT_EXEC=" + args.swiftc_path,
-        "SWIFTPM_PD_LIBS=" + os.path.join(args.bootstrap_dir, "pm"),
-        os.path.join(args.bootstrap_dir, "bin/swift-build"),
-        "--disable-sandbox",
     ]
+
+    if args.bootstrap:
+        note("Building SwiftPM (with a freshly built swift-build)")
+        swiftpm_args.append("SWIFTPM_PD_LIBS=" + os.path.join(args.bootstrap_dir, "pm"))
+        swiftpm_args.append(os.path.join(args.bootstrap_dir, "bin/swift-build"))
+    else:
+        note("Building SwiftPM (with a prebuilt swift-build)")
+        swiftpm_args.append(os.path.join(os.path.split(args.swiftc_path)[0], "swift-build"))
+
+    swiftpm_args.append("--disable-sandbox")
+
     if integrated_swift_driver:
         swiftpm_args.append("--use-integrated-swift-driver")
 
@@ -541,6 +656,7 @@ def build_swiftpm_with_swiftpm(args, integrated_swift_driver):
     # Setup symlinks that'll allow using swiftpm from the build directory.
     symlink_force(args.swiftc_path, os.path.join(args.target_dir, args.conf, "swiftc"))
     symlink_force(args.swiftc_path, os.path.join(args.target_dir, args.conf, "swift"))
+    symlink_force(args.swiftc_path, os.path.join(args.target_dir, args.conf, "swift-autolink-extract"))
 
     lib_dir = os.path.join(args.target_dir, "lib", "swift")
 
@@ -586,7 +702,7 @@ def get_llbuild_source_path(args):
     llbuild_path = os.path.join(args.project_root, "..", "llbuild")
     if os.path.exists(llbuild_path):
         return llbuild_path
-    note("clone llbuild next to swiftpm directory; see development docs: https://github.com/apple/swift-package-manager/blob/master/Documentation/Development.md#using-trunk-snapshot")
+    note("clone llbuild next to swiftpm directory; see development docs: https://github.com/apple/swift-package-manager/blob/master/Documentation/Contributing.md")
     error("unable to find llbuild source directory at %s" % llbuild_path)
 
 def get_swiftpm_env_cmd(args):
@@ -601,18 +717,21 @@ def get_swiftpm_env_cmd(args):
     env_cmd.append("SWIFTCI_USE_LOCAL_DEPS=1")
     env_cmd.append("SWIFTPM_MACOS_DEPLOYMENT_TARGET=%s" % g_macos_deployment_target)
 
-    libs_joined = ":".join([
-        os.path.join(args.bootstrap_dir, "lib"),
-        os.path.join(args.tsc_build_dir, "lib"),
-        os.path.join(args.llbuild_build_dir, "lib"),
-        os.path.join(args.yams_build_dir, "lib"),
-        os.path.join(args.swift_driver_build_dir, "lib"),
-    ])
+    if args.bootstrap:
+        libs_joined = ":".join([
+            os.path.join(args.bootstrap_dir, "lib"),
+            os.path.join(args.tsc_build_dir, "lib"),
+            os.path.join(args.llbuild_build_dir, "lib"),
+            os.path.join(args.yams_build_dir, "lib"),
+            os.path.join(args.swift_argument_parser_build_dir, "lib"),
+            os.path.join(args.swift_driver_build_dir, "lib"),
+            os.path.join(args.swift_crypto_build_dir, "lib"),
+        ] + args.target_info["paths"]["runtimeLibraryPaths"])
 
-    if platform.system() == 'Darwin':
-        env_cmd.append("DYLD_LIBRARY_PATH=%s" % libs_joined)
-    else:
-        env_cmd.append("LD_LIBRARY_PATH=%s" % libs_joined)
+        if platform.system() == 'Darwin':
+            env_cmd.append("DYLD_LIBRARY_PATH=%s" % libs_joined)
+        else:
+            env_cmd.append("LD_LIBRARY_PATH=%s" % libs_joined)
 
     return env_cmd
 
@@ -683,6 +802,18 @@ def get_swiftpm_flags(args):
     # installed executables and shared libraries.
     if platform.system() != "Darwin" and args.command == 'install':
         build_flags.extend(["-Xswiftc", "-no-toolchain-stdlib-rpath"])
+
+    build_target = get_build_target(args)
+    cross_compile_hosts = args.cross_compile_hosts
+    if build_target == 'x86_64-apple-macosx' and "macosx-arm64" in cross_compile_hosts:
+        build_flags += ["--arch", "x86_64", "--arch", "arm64"]
+    elif cross_compile_hosts:
+        error("cannot cross-compile for %s" % cross_compile_hosts)
+
+    # Ensure we are not sharing the module cache with concurrent builds in CI
+    local_module_cache_path=os.path.join(args.build_dir, "module-cache")
+    for modifier in ["-Xswiftc", "-Xmanifest"]:
+        build_flags.extend([modifier, "-module-cache-path", modifier, local_module_cache_path])
 
     return build_flags
 

@@ -16,7 +16,7 @@ import PackageModel
 import PackageGraph
 import SPMBuildCore
 
-public final class XcodeBuildSystem: BuildSystem {
+public final class XcodeBuildSystem: SPMBuildCore.BuildSystem {
     private let buildParameters: BuildParameters
     private let packageGraphLoader: () throws -> PackageGraph
     private let isVerbose: Bool
@@ -28,6 +28,9 @@ public final class XcodeBuildSystem: BuildSystem {
     /// The stdout stream for the build delegate.
     let stdoutStream: OutputByteStream
 
+    /// The delegate used by the build system.
+    public weak var delegate: SPMBuildCore.BuildSystemDelegate?
+
     public var builtTestProducts: [BuiltTestProduct] {
         guard let graph = try? getPackageGraph() else {
             return []
@@ -38,11 +41,12 @@ public final class XcodeBuildSystem: BuildSystem {
         for package in graph.rootPackages {
             for product in package.products where product.type == .test {
                 let binaryPath = buildParameters.binaryPath(for: product)
-                builtProducts.append(BuiltTestProduct(
-                    packageName: package.name,
-                    productName: product.name,
-                    binaryPath: binaryPath
-                ))
+                builtProducts.append(
+                    BuiltTestProduct(
+                        productName: product.name,
+                        binaryPath: binaryPath
+                    )
+                )
             }
         }
 
@@ -137,10 +141,7 @@ public final class XcodeBuildSystem: BuildSystem {
             activeRunDestination: runDestination
         )
 
-        let encoder = JSONEncoder()
-        if #available(macOS 10.13, *) {
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        }
+        let encoder = JSONEncoder.makeWithDefaults()        
 
         let data = try encoder.encode(params)
         let file = try withTemporaryFile(deleteOnClose: false) { $0.path }
@@ -158,6 +159,7 @@ public final class XcodeBuildSystem: BuildSystem {
             ? VerboseProgressAnimation(stream: stdoutStream)
             : MultiLinePercentProgressAnimation(stream: stdoutStream, header: "")
         let delegate = XCBuildDelegate(
+            buildSystem: self,
             diagnostics: diagnostics,
             outputStream: stdoutStream,
             progressAnimation: progressAnimation)
@@ -218,6 +220,7 @@ extension BuildConfiguration {
 extension PIFBuilderParameters {
     public init(_ buildParameters: BuildParameters) {
         self.init(
+            enableTestability: buildParameters.enableTestability,
             shouldCreateDylibForDynamicProducts: buildParameters.shouldCreateDylibForDynamicProducts
         )
     }

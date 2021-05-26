@@ -1,22 +1,22 @@
 /*
  This source file is part of the Swift.org open source project
 
- Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+ Copyright (c) 2014 - 2021 Apple Inc. and the Swift project authors
  Licensed under Apache License v2.0 with Runtime Library Exception
 
  See http://swift.org/LICENSE.txt for license information
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 */
 
-import XCTest
-
+@testable import Build
+@testable import PackageLoading
+import PackageModel
+import SPMBuildCore
+import SPMTestSupport
+import SwiftDriver
 import TSCBasic
 import TSCUtility
-import SPMTestSupport
-import PackageModel
-@testable import PackageLoading
-import SPMBuildCore
-import Build
+import XCTest
 
 let hostTriple = Resources.default.toolchain.triple
 #if os(macOS)
@@ -25,7 +25,7 @@ let hostTriple = Resources.default.toolchain.triple
     let defaultTargetTriple: String = hostTriple.tripleString
 #endif
 
-private struct MockToolchain: Toolchain {
+private struct MockToolchain: SPMBuildCore.Toolchain {
     let swiftCompiler = AbsolutePath("/fake/path/to/swiftc")
     let extraCCFlags: [String] = []
     let extraSwiftCFlags: [String] = []
@@ -48,7 +48,8 @@ private struct MockToolchain: Toolchain {
 }
 
 final class BuildPlanTests: XCTestCase {
-
+    let inputsDir = AbsolutePath(#file).parentDirectory.appending(components: "Inputs")
+    
     /// The j argument.
     private var j: String {
         return "-j3"
@@ -57,26 +58,29 @@ final class BuildPlanTests: XCTestCase {
     func mockBuildParameters(
         buildPath: AbsolutePath = AbsolutePath("/path/to/build"),
         config: BuildConfiguration = .debug,
+        toolchain: SPMBuildCore.Toolchain = MockToolchain(),
         flags: BuildFlags = BuildFlags(),
         shouldLinkStaticSwiftStdlib: Bool = false,
-        destinationTriple: Triple = hostTriple,
-        indexStoreMode: BuildParameters.IndexStoreMode = .off
+        destinationTriple: TSCUtility.Triple = hostTriple,
+        indexStoreMode: BuildParameters.IndexStoreMode = .off,
+        useExplicitModuleBuild: Bool = false
     ) -> BuildParameters {
         return BuildParameters(
             dataPath: buildPath,
             configuration: config,
-            toolchain: MockToolchain(),
+            toolchain: toolchain,
             hostTriple: hostTriple,
             destinationTriple: destinationTriple,
             flags: flags,
             jobs: 3,
             shouldLinkStaticSwiftStdlib: shouldLinkStaticSwiftStdlib,
-            indexStoreMode: indexStoreMode
+            indexStoreMode: indexStoreMode,
+            useExplicitModuleBuild: useExplicitModuleBuild
         )
     }
 
     func mockBuildParameters(environment: BuildEnvironment) -> BuildParameters {
-        let triple: Triple
+        let triple: TSCUtility.Triple
         switch environment.platform {
         case .macOS:
             triple = Triple.macOS
@@ -100,13 +104,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     targets: [
                         TargetDescription(name: "exe", dependencies: ["lib"]),
                         TargetDescription(name: "lib", dependencies: []),
@@ -137,15 +141,15 @@ final class BuildPlanTests: XCTestCase {
             "-Xlinker", "-rpath", "-Xlinker", "@loader_path",
             "@/path/to/build/debug/exe.product/Objects.LinkFileList",
             "-Xlinker", "-rpath", "-Xlinker", "/fake/path/lib/swift/macosx",
-            "-target", "x86_64-apple-macosx10.10", "-Xlinker", "-add_ast_path",
-            "-Xlinker", "/path/to/build/debug/exe.swiftmodule", "-Xlinker", "-add_ast_path",
+            "-target", defaultTargetTriple, "-Xlinker", "-add_ast_path",
+            "-Xlinker", "/path/to/build/debug/exe.build/exe.swiftmodule", "-Xlinker", "-add_ast_path",
             "-Xlinker", "/path/to/build/debug/lib.swiftmodule",
         ]
       #else
         let linkArguments = [
             "/fake/path/to/swiftc", "-L", "/path/to/build/debug",
             "-o", "/path/to/build/debug/exe", "-module-name", "exe",
-            "-emit-executable",
+            "-static-stdlib", "-emit-executable",
             "-Xlinker", "-rpath=$ORIGIN",
             "@/path/to/build/debug/exe.product/Objects.LinkFileList",
             "-target", defaultTargetTriple,
@@ -163,6 +167,98 @@ final class BuildPlanTests: XCTestCase {
       #endif
     }
 
+    func testExplicitSwiftPackageBuild() throws {
+        try withTemporaryDirectory { path in
+            // Create a test package with three targets:
+            // A -> B -> C
+            let fs = localFileSystem
+            try fs.changeCurrentWorkingDirectory(to: path)
+            let testDirPath = path.appending(component: "ExplicitTest")
+            let buildDirPath = path.appending(component: ".build")
+            let sourcesPath = testDirPath.appending(component: "Sources")
+            let aPath = sourcesPath.appending(component: "A")
+            let bPath = sourcesPath.appending(component: "B")
+            let cPath = sourcesPath.appending(component: "C")
+            try fs.createDirectory(testDirPath)
+            try fs.createDirectory(buildDirPath)
+            try fs.createDirectory(sourcesPath)
+            try fs.createDirectory(aPath)
+            try fs.createDirectory(bPath)
+            try fs.createDirectory(cPath)
+            let main = aPath.appending(component: "main.swift")
+            let aSwift = aPath.appending(component: "A.swift")
+            let bSwift = bPath.appending(component: "B.swift")
+            let cSwift = cPath.appending(component: "C.swift")
+            try localFileSystem.writeFileContents(main) {
+              $0 <<< "baz();"
+            }
+            try localFileSystem.writeFileContents(aSwift) {
+                $0 <<< "import B;"
+                $0 <<< "import C;"
+                $0 <<< "public func baz() { bar() }"
+            }
+            try localFileSystem.writeFileContents(bSwift) {
+                $0 <<< "import C;"
+                $0 <<< "public func bar() { foo() }"
+            }
+            try localFileSystem.writeFileContents(cSwift) {
+                $0 <<< "public func foo() {}"
+            }
+
+            // Plan package build with explicit module build
+            let diagnostics = DiagnosticsEngine()
+            let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
+                manifests: [
+                    Manifest.createV4Manifest(
+                        name: "ExplicitTest",
+                        path: testDirPath.description,
+                        packageKind: .root,
+                        packageLocation: "/ExplicitTest",
+                        targets: [
+                            TargetDescription(name: "A", dependencies: ["B"]),
+                            TargetDescription(name: "B", dependencies: ["C"]),
+                            TargetDescription(name: "C", dependencies: []),
+                        ]),
+                ]
+            )
+            XCTAssertNoDiagnostics(diagnostics)
+            do {
+                let plan = try BuildPlan(
+                    buildParameters: mockBuildParameters(
+                        buildPath: buildDirPath,
+                        config: .release,
+                        toolchain: Resources.default.toolchain,
+                        destinationTriple: Resources.default.toolchain.triple,
+                        useExplicitModuleBuild: true
+                    ),
+                    graph: graph,
+                    diagnostics: diagnostics,
+                    fileSystem: fs
+                )
+
+
+                let yaml = buildDirPath.appending(component: "release.yaml")
+                let llbuild = LLBuildManifestBuilder(plan)
+                try llbuild.generateManifest(at: yaml)
+                let contents = try localFileSystem.readFileContents(yaml).description
+
+                // A few basic checks
+                XCTAssertMatch(contents, .contains("-disable-implicit-swift-modules"))
+                XCTAssertMatch(contents, .contains("-fno-implicit-modules"))
+                XCTAssertMatch(contents, .contains("-explicit-swift-module-map-file"))
+                XCTAssertMatch(contents, .contains("A-dependencies"))
+                XCTAssertMatch(contents, .contains("B-dependencies"))
+                XCTAssertMatch(contents, .contains("C-dependencies"))
+            } catch Driver.Error.unableToDecodeFrontendTargetInfo {
+                // If the toolchain being used is sufficiently old, the integrated driver
+                // will not be able to parse the `-print-target-info` output. In which case,
+                // we cannot yet rely on the integrated swift driver.
+                // This effectively guards the test from running on unupported, older toolchains.
+                throw XCTSkip()
+            }
+        }
+    }
+
     func testSwiftConditionalDependency() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Pkg/Sources/exe/main.swift",
@@ -171,14 +267,14 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
+                    packageLocation: "/Pkg",
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/ExtPkg", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/ExtPkg", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     targets: [
                         TargetDescription(name: "exe", dependencies: [
@@ -198,10 +294,10 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "ExtPkg",
                     path: "/ExtPkg",
-                    url: "/ExtPkg",
                     packageKind: .remote,
+                    packageLocation: "/ExtPkg",
                     products: [
-                        ProductDescription(name: "ExtLib", targets: ["ExtLib"]),
+                        ProductDescription(name: "ExtLib", type: .library(.automatic), targets: ["ExtLib"]),
                     ],
                     targets: [
                         TargetDescription(name: "ExtLib", dependencies: []),
@@ -227,7 +323,7 @@ final class BuildPlanTests: XCTestCase {
             XCTAssertMatch(linkedFileList.description, .contains("PkgLib"))
             XCTAssertNoMatch(linkedFileList.description, .contains("ExtLib"))
 
-            mktmpdir { path in
+            try testWithTemporaryDirectory { path in
                 let yaml = path.appending(component: "release.yaml")
                 let llbuild = LLBuildManifestBuilder(plan)
                 try llbuild.generateManifest(at: yaml)
@@ -253,7 +349,7 @@ final class BuildPlanTests: XCTestCase {
             XCTAssertNoMatch(linkedFileList.description, .contains("PkgLib"))
             XCTAssertNoMatch(linkedFileList.description, .contains("ExtLib"))
 
-            mktmpdir { path in
+            try testWithTemporaryDirectory { path in
                 let yaml = path.appending(component: "debug.yaml")
                 let llbuild = LLBuildManifestBuilder(plan)
                 try llbuild.generateManifest(at: yaml)
@@ -269,22 +365,20 @@ final class BuildPlanTests: XCTestCase {
         let fileSystem = InMemoryFileSystem(emptyFiles:
             "/A/Sources/ATarget/foo.swift",
             "/A/Tests/ATargetTests/foo.swift",
-            "/A/Tests/LinuxMain.swift",
             "/B/Sources/BTarget/foo.swift",
-            "/B/Tests/BTargetTests/foo.swift",
-            "/B/Tests/LinuxMain.swift"
+            "/B/Tests/BTargetTests/foo.swift"
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "A",
                     path: "/A",
-                    url: "/A",
                     packageKind: .root,
+                    packageLocation: "/A",
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/B", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/B", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     targets: [
                         TargetDescription(name: "ATarget", dependencies: ["BLibrary"]),
@@ -293,10 +387,10 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "B",
                     path: "/B",
-                    url: "/B",
                     packageKind: .local,
+                    packageLocation: "/B",
                     products: [
-                        ProductDescription(name: "BLibrary", targets: ["BTarget"]),
+                        ProductDescription(name: "BLibrary", type: .library(.automatic), targets: ["BTarget"]),
                     ],
                     targets: [
                         TargetDescription(name: "BTarget", dependencies: []),
@@ -330,13 +424,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     targets: [
                         TargetDescription(name: "exe", dependencies: []),
                     ]),
@@ -359,7 +453,7 @@ final class BuildPlanTests: XCTestCase {
             "-Xlinker", "-rpath", "-Xlinker", "@loader_path",
             "@/path/to/build/release/exe.product/Objects.LinkFileList",
             "-Xlinker", "-rpath", "-Xlinker", "/fake/path/lib/swift/macosx",
-            "-target", "x86_64-apple-macosx10.10",
+            "-target", defaultTargetTriple,
         ])
       #else
         XCTAssertEqual(try result.buildProduct(for: "exe").linkArguments(), [
@@ -383,15 +477,15 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/ExtPkg", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/ExtPkg", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     targets: [
                         TargetDescription(name: "exe", dependencies: ["lib"]),
@@ -400,10 +494,10 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "ExtPkg",
                     path: "/ExtPkg",
-                    url: "/ExtPkg",
                     packageKind: .local,
+                    packageLocation: "/ExtPkg",
                     products: [
-                        ProductDescription(name: "ExtPkg", targets: ["extlib"]),
+                        ProductDescription(name: "ExtPkg", type: .library(.automatic), targets: ["extlib"]),
                     ],
                     targets: [
                         TargetDescription(name: "extlib", dependencies: []),
@@ -461,7 +555,7 @@ final class BuildPlanTests: XCTestCase {
             "-Xlinker", "-rpath", "-Xlinker", "@loader_path",
             "@/path/to/build/debug/exe.product/Objects.LinkFileList",
             "-runtime-compatibility-version", "none",
-            "-target", "x86_64-apple-macosx10.10",
+            "-target", defaultTargetTriple,
         ])
       #else
         XCTAssertEqual(try result.buildProduct(for: "exe").linkArguments(), [
@@ -494,16 +588,16 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
+                    packageLocation: "/Pkg",
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/ExtPkg", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/ExtPkg", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     targets: [
                         TargetDescription(name: "exe", dependencies: [
@@ -522,10 +616,10 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "ExtPkg",
                     path: "/ExtPkg",
-                    url: "/ExtPkg",
                     packageKind: .remote,
+                    packageLocation: "/ExtPkg",
                     products: [
-                        ProductDescription(name: "ExtPkg", targets: ["ExtLib"]),
+                        ProductDescription(name: "ExtPkg", type: .library(.automatic), targets: ["ExtLib"]),
                     ],
                     targets: [
                         TargetDescription(name: "ExtLib", dependencies: []),
@@ -582,13 +676,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     cLanguageStandard: "gnu99",
                     cxxLanguageStandard: "c++1z",
                     targets: [
@@ -612,7 +706,7 @@ final class BuildPlanTests: XCTestCase {
             "-Xlinker", "-rpath", "-Xlinker", "@loader_path",
             "@/path/to/build/debug/exe.product/Objects.LinkFileList",
             "-runtime-compatibility-version", "none",
-            "-target", "x86_64-apple-macosx10.10",
+            "-target", defaultTargetTriple,
         ])
       #else
         XCTAssertEqual(try result.buildProduct(for: "exe").linkArguments(), [
@@ -625,7 +719,7 @@ final class BuildPlanTests: XCTestCase {
         ])
       #endif
 
-        mktmpdir { path in
+        try testWithTemporaryDirectory { path in
             let yaml = path.appending(component: "debug.yaml")
             let llbuild = LLBuildManifestBuilder(plan)
             try llbuild.generateManifest(at: yaml)
@@ -643,13 +737,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     targets: [
                         TargetDescription(name: "exe", dependencies: ["lib"]),
                         TargetDescription(name: "lib", dependencies: []),
@@ -679,7 +773,7 @@ final class BuildPlanTests: XCTestCase {
         XCTAssertEqual(lib.moduleMap, AbsolutePath("/path/to/build/debug/lib.build/module.modulemap"))
 
         let exe = try result.target(for: "exe").swiftTarget().compileArguments()
-        XCTAssertMatch(exe, ["-swift-version", "4", "-enable-batch-mode", "-Onone", "-enable-testing", "-g", .equal(j), "-DSWIFT_PACKAGE", "-DDEBUG","-Xcc", "-fmodule-map-file=/path/to/build/debug/lib.build/module.modulemap", "-I", "/Pkg/Sources/lib/include", "-module-cache-path", "/path/to/build/debug/ModuleCache", .anySequence])
+        XCTAssertMatch(exe, ["-swift-version", "4", "-enable-batch-mode", "-Onone", "-enable-testing", "-g", .equal(j), "-DSWIFT_PACKAGE", "-DDEBUG","-Xcc", "-fmodule-map-file=/path/to/build/debug/lib.build/module.modulemap", "-Xcc", "-I", "-Xcc", "/Pkg/Sources/lib/include", "-module-cache-path", "/path/to/build/debug/ModuleCache", .anySequence])
 
       #if os(macOS)
         XCTAssertEqual(try result.buildProduct(for: "exe").linkArguments(), [
@@ -688,8 +782,8 @@ final class BuildPlanTests: XCTestCase {
             "-Xlinker", "-rpath", "-Xlinker", "@loader_path",
             "@/path/to/build/debug/exe.product/Objects.LinkFileList",
             "-Xlinker", "-rpath", "-Xlinker", "/fake/path/lib/swift/macosx",
-            "-target", "x86_64-apple-macosx10.10",
-            "-Xlinker", "-add_ast_path", "-Xlinker", "/path/to/build/debug/exe.swiftmodule",
+            "-target", defaultTargetTriple,
+            "-Xlinker", "-add_ast_path", "-Xlinker", "/path/to/build/debug/exe.build/exe.swiftmodule",
         ])
       #else
         XCTAssertEqual(try result.buildProduct(for: "exe").linkArguments(), [
@@ -711,15 +805,15 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
-                    v: .v5,
                     packageKind: .root,
+                    packageLocation: "/Pkg",
+                    v: .v5,
                     targets: [
                         TargetDescription(name: "exe", dependencies: ["lib"]),
                         TargetDescription(name: "lib", dependencies: []),
@@ -752,15 +846,15 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/Dep", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/Dep", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     targets: [
                         TargetDescription(name: "exe", dependencies: ["swiftlib"]),
@@ -770,10 +864,10 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "Dep",
                     path: "/Dep",
-                    url: "/Dep",
                     packageKind: .local,
+                    packageLocation: "/Dep",
                     products: [
-                        ProductDescription(name: "Dep", targets: ["Dep"]),
+                        ProductDescription(name: "Dep", type: .library(.automatic), targets: ["Dep"]),
                     ],
                     targets: [
                         TargetDescription(name: "Dep", dependencies: ["CDep"]),
@@ -797,18 +891,18 @@ final class BuildPlanTests: XCTestCase {
     func testTestModule() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Pkg/Sources/Foo/foo.swift",
-            "/Pkg/Tests/LinuxMain.swift",
+            "/Pkg/Tests/\(SwiftTarget.testManifestNames.first!).swift",
             "/Pkg/Tests/FooTests/foo.swift"
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     targets: [
                         TargetDescription(name: "Foo", dependencies: []),
                         TargetDescription(name: "FooTests", dependencies: ["Foo"], type: .test),
@@ -822,7 +916,7 @@ final class BuildPlanTests: XCTestCase {
       #if os(macOS)
         result.checkTargetsCount(2)
       #else
-        // We have an extra LinuxMain target on linux.
+        // We have an extra test discovery target on linux.
         result.checkTargetsCount(3)
       #endif
 
@@ -841,7 +935,7 @@ final class BuildPlanTests: XCTestCase {
             "-Xlinker", "-rpath", "-Xlinker", "@loader_path/../../../",
             "@/path/to/build/debug/PkgPackageTests.product/Objects.LinkFileList",
             "-Xlinker", "-rpath", "-Xlinker", "/fake/path/lib/swift/macosx",
-            "-target", "x86_64-apple-macosx\(version)",
+            "-target", "\(hostTriple.tripleString(forPlatformVersion: version))",
             "-Xlinker", "-add_ast_path", "-Xlinker", "/path/to/build/debug/Foo.swiftmodule",
             "-Xlinker", "-add_ast_path", "-Xlinker", "/path/to/build/debug/FooTests.swiftmodule",
         ])
@@ -856,6 +950,58 @@ final class BuildPlanTests: XCTestCase {
       #endif
     }
 
+    func testParseAsLibraryFlagForExe() throws {
+        let fs = InMemoryFileSystem(emptyFiles:
+            // First executable has a single source file not named `main.swift`.
+            "/Pkg/Sources/exe1/foo.swift",
+            // Second executable has a single source file named `main.swift`.
+            "/Pkg/Sources/exe2/main.swift",
+            // Third executable has multiple source files.
+            "/Pkg/Sources/exe3/bar.swift",
+            "/Pkg/Sources/exe3/main.swift"
+        )
+
+        let diagnostics = DiagnosticsEngine()
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
+            manifests: [
+                Manifest.createV4Manifest(
+                    name: "Pkg",
+                    path: "/Pkg",
+                    packageKind: .root,
+                    packageLocation: "/Pkg",
+                    toolsVersion: .v5_5,
+                    targets: [
+                        TargetDescription(name: "exe1", type: .executable),
+                        TargetDescription(name: "exe2", type: .executable),
+                        TargetDescription(name: "exe3", type: .executable),
+                    ]),
+            ]
+        )
+        XCTAssertNoDiagnostics(diagnostics)
+
+        let result = BuildPlanResult(plan: try BuildPlan(
+            buildParameters: mockBuildParameters(shouldLinkStaticSwiftStdlib: true),
+            graph: graph, diagnostics: diagnostics, fileSystem: fs)
+        )
+
+        result.checkProductsCount(3)
+        result.checkTargetsCount(3)
+
+        XCTAssertNoDiagnostics(diagnostics)
+
+        // Check that the first target (single source file not named main) has -parse-as-library.
+        let exe1 = try result.target(for: "exe1").swiftTarget().emitCommandLine()
+        XCTAssertMatch(exe1, ["-parse-as-library", .anySequence])
+
+        // Check that the second target (single source file named main) does not have -parse-as-library.
+        let exe2 = try result.target(for: "exe2").swiftTarget().emitCommandLine()
+        XCTAssertNoMatch(exe2, ["-parse-as-library", .anySequence])
+
+        // Check that the third target (multiple source files) does not have -parse-as-library.
+        let exe3 = try result.target(for: "exe3").swiftTarget().emitCommandLine()
+        XCTAssertNoMatch(exe3, ["-parse-as-library", .anySequence])
+    }
+
     func testCModule() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Pkg/Sources/exe/main.swift",
@@ -863,15 +1009,15 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "Clibgit", requirement: .upToNextMajor(from: "1.0.0"))
+                        .scm(location: "Clibgit", requirement: .upToNextMajor(from: "1.0.0"))
                     ],
                     targets: [
                         TargetDescription(name: "exe", dependencies: []),
@@ -879,8 +1025,8 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "Clibgit",
                     path: "/Clibgit",
-                    url: "/Clibgit",
-                    packageKind: .local),
+                    packageKind: .local,
+                    packageLocation: "/Clibgit"),
             ]
         )
         XCTAssertNoDiagnostics(diagnostics)
@@ -898,8 +1044,8 @@ final class BuildPlanTests: XCTestCase {
             "-Xlinker", "-rpath", "-Xlinker", "@loader_path",
             "@/path/to/build/debug/exe.product/Objects.LinkFileList",
             "-Xlinker", "-rpath", "-Xlinker", "/fake/path/lib/swift/macosx",
-            "-target", "x86_64-apple-macosx10.10",
-            "-Xlinker", "-add_ast_path", "-Xlinker", "/path/to/build/debug/exe.swiftmodule",
+            "-target", defaultTargetTriple,
+            "-Xlinker", "-add_ast_path", "-Xlinker", "/path/to/build/debug/exe.build/exe.swiftmodule",
         ])
       #else
         XCTAssertEqual(try result.buildProduct(for: "exe").linkArguments(), [
@@ -920,13 +1066,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     targets: [
                         TargetDescription(name: "lib", dependencies: []),
                         TargetDescription(name: "exe", dependencies: ["lib"]),
@@ -954,13 +1100,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let g = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let g = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Bar",
                     path: "/Bar",
-                    url: "/Bar",
                     packageKind: .local,
+                    packageLocation: "/Bar",
                     products: [
                         ProductDescription(name: "Bar-Baz", type: .library(.dynamic), targets: ["Bar"]),
                     ],
@@ -970,10 +1116,10 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "Foo",
                     path: "/Foo",
-                    url: "/Foo",
                     packageKind: .root,
+                    packageLocation: "/Foo",
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/Bar", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/Bar", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     targets: [
                         TargetDescription(name: "Foo", dependencies: ["Bar-Baz"]),
@@ -996,8 +1142,8 @@ final class BuildPlanTests: XCTestCase {
            "-Xlinker", "-rpath", "-Xlinker", "@loader_path",
             "@/path/to/build/debug/Foo.product/Objects.LinkFileList",
             "-Xlinker", "-rpath", "-Xlinker", "/fake/path/lib/swift/macosx",
-            "-target", "x86_64-apple-macosx10.10",
-            "-Xlinker", "-add_ast_path", "-Xlinker", "/path/to/build/debug/Foo.swiftmodule"
+            "-target", defaultTargetTriple,
+            "-Xlinker", "-add_ast_path", "-Xlinker", "/path/to/build/debug/Foo.build/Foo.swiftmodule"
         ])
 
         XCTAssertEqual(barLinkArgs, [
@@ -1007,7 +1153,7 @@ final class BuildPlanTests: XCTestCase {
             "-Xlinker", "-install_name", "-Xlinker", "@rpath/libBar-Baz.dylib",
             "-Xlinker", "-rpath", "-Xlinker", "@loader_path",
             "@/path/to/build/debug/Bar-Baz.product/Objects.LinkFileList",
-            "-target", "x86_64-apple-macosx10.10",
+            "-target", defaultTargetTriple,
             "-Xlinker", "-add_ast_path", "-Xlinker", "/path/to/build/debug/Bar.swiftmodule"
         ])
       #else
@@ -1047,13 +1193,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     products: [
                         ProductDescription(name: "lib", type: .library(.dynamic), targets: ["lib"]),
                     ],
@@ -1087,7 +1233,7 @@ final class BuildPlanTests: XCTestCase {
                 "-Xlinker", "-install_name", "-Xlinker", "@rpath/liblib.dylib",
                 "-Xlinker", "-rpath", "-Xlinker", "@loader_path",
                 "@/path/to/build/debug/lib.product/Objects.LinkFileList",
-                "-target", "x86_64-apple-macosx10.10",
+                "-target", defaultTargetTriple,
                 "-Xlinker", "-add_ast_path", "-Xlinker", "/path/to/build/debug/lib.swiftmodule",
             ]
         #else
@@ -1111,13 +1257,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     products: [
                         ProductDescription(name: "lib", type: .library(.dynamic), targets: ["lib"]),
                     ],
@@ -1157,9 +1303,9 @@ final class BuildPlanTests: XCTestCase {
         XCTAssertEqual(lib.moduleMap, AbsolutePath("/path/to/build/debug/lib.build/module.modulemap"))
 
     #if os(macOS)
-        XCTAssertEqual(try result.buildProduct(for: "lib").linkArguments(), ["/fake/path/to/swiftc", "-lc++", "-L", "/path/to/build/debug", "-o", "/path/to/build/debug/liblib.dylib", "-module-name", "lib", "-emit-library", "-Xlinker", "-install_name", "-Xlinker", "@rpath/liblib.dylib", "-Xlinker", "-rpath", "-Xlinker", "@loader_path", "@/path/to/build/debug/lib.product/Objects.LinkFileList", "-runtime-compatibility-version", "none", "-target", "x86_64-apple-macosx10.10"])
+        XCTAssertEqual(try result.buildProduct(for: "lib").linkArguments(), ["/fake/path/to/swiftc", "-lc++", "-L", "/path/to/build/debug", "-o", "/path/to/build/debug/liblib.dylib", "-module-name", "lib", "-emit-library", "-Xlinker", "-install_name", "-Xlinker", "@rpath/liblib.dylib", "-Xlinker", "-rpath", "-Xlinker", "@loader_path", "@/path/to/build/debug/lib.product/Objects.LinkFileList", "-runtime-compatibility-version", "none", "-target", defaultTargetTriple])
             
-        XCTAssertEqual(try result.buildProduct(for: "exe").linkArguments(), ["/fake/path/to/swiftc", "-L", "/path/to/build/debug", "-o", "/path/to/build/debug/exe", "-module-name", "exe", "-emit-executable", "-Xlinker", "-rpath", "-Xlinker", "@loader_path", "@/path/to/build/debug/exe.product/Objects.LinkFileList", "-runtime-compatibility-version", "none", "-target", "x86_64-apple-macosx10.10"])
+        XCTAssertEqual(try result.buildProduct(for: "exe").linkArguments(), ["/fake/path/to/swiftc", "-L", "/path/to/build/debug", "-o", "/path/to/build/debug/exe", "-module-name", "exe", "-emit-executable", "-Xlinker", "-rpath", "-Xlinker", "@loader_path", "@/path/to/build/debug/exe.product/Objects.LinkFileList", "-runtime-compatibility-version", "none", "-target", defaultTargetTriple])
     #else
         XCTAssertEqual(try result.buildProduct(for: "lib").linkArguments(), ["/fake/path/to/swiftc", "-lstdc++", "-L", "/path/to/build/debug", "-o", "/path/to/build/debug/liblib.so", "-module-name", "lib", "-emit-library", "-Xlinker", "-rpath=$ORIGIN", "@/path/to/build/debug/lib.product/Objects.LinkFileList", "-runtime-compatibility-version", "none", "-target", defaultTargetTriple])
         XCTAssertEqual(try result.buildProduct(for: "exe").linkArguments(), ["/fake/path/to/swiftc", "-L", "/path/to/build/debug", "-o", "/path/to/build/debug/exe", "-module-name", "exe", "-emit-executable", "-Xlinker", "-rpath=$ORIGIN", "@/path/to/build/debug/exe.product/Objects.LinkFileList", "-runtime-compatibility-version", "none", "-target", defaultTargetTriple])
@@ -1175,16 +1321,16 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "A",
                     path: "/A",
-                    url: "/A",
                     packageKind: .root,
+                    packageLocation: "/A",
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/B", requirement: .upToNextMajor(from: "1.0.0")),
-                        PackageDependencyDescription(name: nil, url: "/C", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/B", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/C", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     products: [
                         ProductDescription(name: "aexec", type: .executable, targets: ["ATarget"])
@@ -1195,8 +1341,8 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "B",
                     path: "/B",
-                    url: "/B",
                     packageKind: .local,
+                    packageLocation: "/B",
                     products: [
                         ProductDescription(name: "BLibrary", type: .library(.static), targets: ["BTarget1"]),
                         ProductDescription(name: "bexec", type: .executable, targets: ["BTarget2"]),
@@ -1208,8 +1354,8 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "C",
                     path: "/C",
-                    url: "/C",
                     packageKind: .local,
+                    packageLocation: "/C",
                     products: [
                         ProductDescription(name: "cexec", type: .executable, targets: ["CTarget"])
                     ],
@@ -1219,18 +1365,25 @@ final class BuildPlanTests: XCTestCase {
             ]
         )
 
+        #if ENABLE_TARGET_BASED_DEPENDENCY_RESOLUTION
         XCTAssertEqual(diagnostics.diagnostics.count, 1)
         let firstDiagnostic = diagnostics.diagnostics.first.map({ $0.message.text })
         XCTAssert(
             firstDiagnostic == "dependency 'C' is not used by any target",
             "Unexpected diagnostic: " + (firstDiagnostic ?? "[none]")
         )
+        #endif
 
         let graphResult = PackageGraphResult(graph)
         graphResult.check(reachableProducts: "aexec", "BLibrary")
         graphResult.check(reachableTargets: "ATarget", "BTarget1")
+        #if ENABLE_TARGET_BASED_DEPENDENCY_RESOLUTION
         graphResult.check(products: "aexec", "BLibrary")
         graphResult.check(targets: "ATarget", "BTarget1")
+        #else
+        graphResult.check(products: "BLibrary", "bexec", "aexec", "cexec")
+        graphResult.check(targets: "ATarget", "BTarget1", "BTarget2", "CTarget")
+        #endif
 
         let planResult = BuildPlanResult(plan: try BuildPlan(
             buildParameters: mockBuildParameters(),
@@ -1239,8 +1392,13 @@ final class BuildPlanTests: XCTestCase {
             fileSystem: fileSystem
         ))
 
+        #if ENABLE_TARGET_BASED_DEPENDENCY_RESOLUTION
         planResult.checkProductsCount(2)
         planResult.checkTargetsCount(2)
+        #else
+        planResult.checkProductsCount(4)
+        planResult.checkTargetsCount(4)
+        #endif
     }
 
     func testReachableBuildProductsAndTargets() throws {
@@ -1253,17 +1411,17 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fileSystem,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "A",
                     path: "/A",
-                    url: "/A",
+                    packageLocation: "/A",
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/B", requirement: .upToNextMajor(from: "1.0.0")),
-                        PackageDependencyDescription(name: nil, url: "/C", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/B", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/C", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     products: [
                         ProductDescription(name: "aexec", type: .executable, targets: ["ATarget"]),
@@ -1288,8 +1446,8 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "B",
                     path: "/B",
-                    url: "/B",
                     packageKind: .remote,
+                    packageLocation: "/B",
                     products: [
                         ProductDescription(name: "BLibrary1", type: .library(.static), targets: ["BTarget1"]),
                         ProductDescription(name: "BLibrary2", type: .library(.static), targets: ["BTarget2"]),
@@ -1308,8 +1466,8 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "C",
                     path: "/C",
-                    url: "/C",
                     packageKind: .remote,
+                    packageLocation: "/C",
                     products: [
                         ProductDescription(name: "CLibrary", type: .library(.static), targets: ["CTarget"])
                     ],
@@ -1325,8 +1483,8 @@ final class BuildPlanTests: XCTestCase {
 
         do {
             let linuxDebug = BuildEnvironment(platform: .linux, configuration: .debug)
-            graphResult.check(reachableBuildProducts: "aexec", "BLibrary1", "BLibrary2", in: linuxDebug)
-            graphResult.check(reachableBuildTargets: "ATarget", "BTarget1", "BTarget2", in: linuxDebug)
+            try graphResult.check(reachableBuildProducts: "aexec", "BLibrary1", "BLibrary2", in: linuxDebug)
+            try graphResult.check(reachableBuildTargets: "ATarget", "BTarget1", "BTarget2", in: linuxDebug)
 
             let planResult = BuildPlanResult(plan: try BuildPlan(
                 buildParameters: mockBuildParameters(environment: linuxDebug),
@@ -1340,8 +1498,8 @@ final class BuildPlanTests: XCTestCase {
 
         do {
             let macosDebug = BuildEnvironment(platform: .macOS, configuration: .debug)
-            graphResult.check(reachableBuildProducts: "aexec", "BLibrary2", in: macosDebug)
-            graphResult.check(reachableBuildTargets: "ATarget", "BTarget2", "BTarget3", in: macosDebug)
+            try graphResult.check(reachableBuildProducts: "aexec", "BLibrary2", in: macosDebug)
+            try graphResult.check(reachableBuildTargets: "ATarget", "BTarget2", "BTarget3", in: macosDebug)
 
             let planResult = BuildPlanResult(plan: try BuildPlan(
                 buildParameters: mockBuildParameters(environment: macosDebug),
@@ -1355,8 +1513,8 @@ final class BuildPlanTests: XCTestCase {
 
         do {
             let androidRelease = BuildEnvironment(platform: .android, configuration: .release)
-            graphResult.check(reachableBuildProducts: "aexec", "CLibrary", in: androidRelease)
-            graphResult.check(reachableBuildTargets: "ATarget", "CTarget", in: androidRelease)
+            try graphResult.check(reachableBuildProducts: "aexec", "CLibrary", in: androidRelease)
+            try graphResult.check(reachableBuildTargets: "ATarget", "CTarget", in: androidRelease)
 
             let planResult = BuildPlanResult(plan: try BuildPlan(
                 buildParameters: mockBuildParameters(environment: androidRelease),
@@ -1375,13 +1533,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
-                    packageKind: .root
+                    packageKind: .root,
+                    packageLocation: "/Pkg"
                 ),
             ]
         )
@@ -1401,13 +1559,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "A",
                     path: "/A",
-                    url: "/A",
                     packageKind: .root,
+                    packageLocation: "/A",
                     targets: [
                         TargetDescription(name: "ATarget", dependencies: ["BTarget"]),
                         TargetDescription(
@@ -1437,13 +1595,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "A",
                     path: "/A",
-                    url: "/A",
                     packageKind: .root,
+                    packageLocation: "/A",
                     targets: [
                         TargetDescription(name: "ATarget", dependencies: ["BTarget"]),
                         TargetDescription(
@@ -1460,7 +1618,7 @@ final class BuildPlanTests: XCTestCase {
 
         let diagnostic = diagnostics.diagnostics.last!
 
-        XCTAssertEqual(diagnostic.message.text, "couldn't find pc file")
+        XCTAssertEqual(diagnostic.message.text, "couldn't find pc file for BTarget")
         XCTAssertEqual(diagnostic.message.behavior, .warning)
         XCTAssertEqual(diagnostic.location.description, "'BTarget' BTarget.pc")
     }
@@ -1468,19 +1626,19 @@ final class BuildPlanTests: XCTestCase {
     func testWindowsTarget() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Pkg/Sources/exe/main.swift",
-                                    "/Pkg/Sources/lib/lib.c",
-                                    "/Pkg/Sources/lib/include/lib.h"
+            "/Pkg/Sources/lib/lib.c",
+            "/Pkg/Sources/lib/include/lib.h"
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     targets: [
                     TargetDescription(name: "exe", dependencies: ["lib"]),
                     TargetDescription(name: "lib", dependencies: []),
@@ -1494,14 +1652,16 @@ final class BuildPlanTests: XCTestCase {
         result.checkTargetsCount(2)
 
         let lib = try result.target(for: "lib").clangTarget()
-        var args = ["-target", "x86_64-unknown-windows-msvc", "-g", "-gcodeview", "-O0", "-DSWIFT_PACKAGE=1", "-DDEBUG=1"]
-        args += ["-fblocks", "-I", "/Pkg/Sources/lib/include"]
+        let args = [
+            "-target", "x86_64-unknown-windows-msvc", "-g", "-gcodeview", "-O0",
+            "-DSWIFT_PACKAGE=1", "-DDEBUG=1", "-fblocks", "-I", "/Pkg/Sources/lib/include"
+        ]
         XCTAssertEqual(lib.basicArguments(), args)
         XCTAssertEqual(lib.objects, [AbsolutePath("/path/to/build/debug/lib.build/lib.c.o")])
         XCTAssertEqual(lib.moduleMap, AbsolutePath("/path/to/build/debug/lib.build/module.modulemap"))
 
         let exe = try result.target(for: "exe").swiftTarget().compileArguments()
-        XCTAssertMatch(exe, ["-swift-version", "4", "-enable-batch-mode", "-Onone", "-enable-testing", "-g", .equal(j), "-DSWIFT_PACKAGE", "-DDEBUG","-Xcc", "-fmodule-map-file=/path/to/build/debug/lib.build/module.modulemap", "-I", "/Pkg/Sources/lib/include", "-module-cache-path", "/path/to/build/debug/ModuleCache", .anySequence])
+        XCTAssertMatch(exe, ["-swift-version", "4", "-enable-batch-mode", "-Onone", "-enable-testing", "-g", .equal(j), "-DSWIFT_PACKAGE", "-DDEBUG","-Xcc", "-fmodule-map-file=/path/to/build/debug/lib.build/module.modulemap", "-Xcc", "-I", "-Xcc", "/Pkg/Sources/lib/include", "-module-cache-path", "/path/to/build/debug/ModuleCache", .anySequence])
 
         XCTAssertEqual(try result.buildProduct(for: "exe").linkArguments(), [
             "/fake/path/to/swiftc",
@@ -1515,6 +1675,99 @@ final class BuildPlanTests: XCTestCase {
         XCTAssertMatch(executablePathExtension, "exe")
     }
 
+    func testWASITarget() throws {
+        let fs = InMemoryFileSystem(emptyFiles:
+            "/Pkg/Sources/app/main.swift",
+            "/Pkg/Sources/lib/lib.c",
+            "/Pkg/Sources/lib/include/lib.h",
+            "/Pkg/Tests/test/TestCase.swift"
+        )
+
+        let diagnostics = DiagnosticsEngine()
+        let graph = try loadPackageGraph(
+            fs: fs, diagnostics: diagnostics,
+            manifests: [
+                Manifest.createV4Manifest(
+                    name: "Pkg",
+                    path: "/Pkg",
+                    packageKind: .root,
+                    packageLocation: "/Pkg",
+                    targets: [
+                        TargetDescription(name: "app", dependencies: ["lib"]),
+                        TargetDescription(name: "lib", dependencies: []),
+                        TargetDescription(name: "test", dependencies: ["lib"], type: .test)
+                    ]
+                ),
+            ]
+        )
+        XCTAssertNoDiagnostics(diagnostics)
+
+        var parameters = mockBuildParameters(destinationTriple: .wasi)
+        parameters.shouldLinkStaticSwiftStdlib = true
+        let result = BuildPlanResult(
+            plan: try BuildPlan(
+                buildParameters: parameters,
+                graph: graph,
+                diagnostics: diagnostics,
+                fileSystem: fs
+            )
+        )
+        result.checkProductsCount(2)
+        result.checkTargetsCount(4)
+
+        let lib = try result.target(for: "lib").clangTarget()
+        let args = [
+            "-target", "wasm32-unknown-wasi", "-g", "-O0", "-DSWIFT_PACKAGE=1", "-DDEBUG=1",
+            "-fblocks", "-fmodules", "-fmodule-name=lib", "-I", "/Pkg/Sources/lib/include",
+            "-fmodules-cache-path=/path/to/build/debug/ModuleCache"
+        ]
+        XCTAssertEqual(lib.basicArguments(), args)
+        XCTAssertEqual(lib.objects, [AbsolutePath("/path/to/build/debug/lib.build/lib.c.o")])
+        XCTAssertEqual(lib.moduleMap, AbsolutePath("/path/to/build/debug/lib.build/module.modulemap"))
+
+        let exe = try result.target(for: "app").swiftTarget().compileArguments()
+        XCTAssertMatch(
+            exe,
+            [
+                "-swift-version", "4", "-enable-batch-mode", "-Onone", "-enable-testing", "-g",
+                .equal(j), "-DSWIFT_PACKAGE", "-DDEBUG","-Xcc",
+                "-fmodule-map-file=/path/to/build/debug/lib.build/module.modulemap",
+                "-Xcc", "-I", "-Xcc", "/Pkg/Sources/lib/include",
+                "-module-cache-path", "/path/to/build/debug/ModuleCache", .anySequence
+            ]
+        )
+
+        let appBuildDescription = try result.buildProduct(for: "app")
+        XCTAssertEqual(
+            try appBuildDescription.linkArguments(),
+            [
+                "/fake/path/to/swiftc", "-L", "/path/to/build/debug",
+                "-o", "/path/to/build/debug/app.wasm",
+                 "-module-name", "app", "-static-stdlib", "-emit-executable",
+                 "@/path/to/build/debug/app.product/Objects.LinkFileList",
+                 "-target", "wasm32-unknown-wasi"
+            ]
+        )
+
+        let executablePathExtension = appBuildDescription.binary.extension
+        XCTAssertEqual(executablePathExtension, "wasm")
+
+        let testBuildDescription = try result.buildProduct(for: "PkgPackageTests")
+        XCTAssertEqual(
+            try testBuildDescription.linkArguments(),
+            [
+                "/fake/path/to/swiftc", "-L", "/path/to/build/debug",
+                "-o", "/path/to/build/debug/PkgPackageTests.wasm",
+                "-module-name", "PkgPackageTests", "-emit-executable",
+                "@/path/to/build/debug/PkgPackageTests.product/Objects.LinkFileList",
+                "-target", "wasm32-unknown-wasi"
+            ]
+        )
+
+        let testPathExtension = testBuildDescription.binary.extension
+        XCTAssertEqual(testPathExtension, "wasm")
+    }
+
     func testIndexStore() throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Pkg/Sources/exe/main.swift",
@@ -1523,13 +1776,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     targets: [
                         TargetDescription(name: "exe", dependencies: ["lib"]),
                         TargetDescription(name: "lib", dependencies: []),
@@ -1566,34 +1819,34 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "A",
+                    path: "/A",
+                    packageKind: .root,
+                    packageLocation: "/A",
                     platforms: [
                         PlatformDescription(name: "macos", version: "10.13"),
                     ],
-                    path: "/A",
-                    url: "/A",
                     v: .v5,
-                    packageKind: .root,
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/B", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/B", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     targets: [
                         TargetDescription(name: "ATarget", dependencies: ["BLibrary"]),
                     ]),
                 Manifest.createManifest(
                     name: "B",
+                    path: "/B",
+                    packageKind: .local,
+                    packageLocation: "/B",
                     platforms: [
                         PlatformDescription(name: "macos", version: "10.12"),
                     ],
-                    path: "/B",
-                    url: "/B",
                     v: .v5,
-                    packageKind: .local,
                     products: [
-                        ProductDescription(name: "BLibrary", targets: ["BTarget"]),
+                        ProductDescription(name: "BLibrary", type: .library(.automatic), targets: ["BTarget"]),
                     ],
                     targets: [
                         TargetDescription(name: "BTarget", dependencies: []),
@@ -1609,14 +1862,14 @@ final class BuildPlanTests: XCTestCase {
 
         let aTarget = try result.target(for: "ATarget").swiftTarget().compileArguments()
       #if os(macOS)
-        XCTAssertMatch(aTarget, ["-target", "x86_64-apple-macosx10.13", .anySequence])
+        XCTAssertMatch(aTarget, [.equal("-target"), .equal(hostTriple.tripleString(forPlatformVersion: "10.13")), .anySequence])
       #else
         XCTAssertMatch(aTarget, [.equal("-target"), .equal(defaultTargetTriple), .anySequence] )
       #endif
 
         let bTarget = try result.target(for: "BTarget").swiftTarget().compileArguments()
       #if os(macOS)
-        XCTAssertMatch(bTarget, ["-target", "x86_64-apple-macosx10.12", .anySequence])
+        XCTAssertMatch(bTarget, [.equal("-target"), .equal(hostTriple.tripleString(forPlatformVersion: "10.12")), .anySequence])
       #else
         XCTAssertMatch(bTarget, [.equal("-target"), .equal(defaultTargetTriple), .anySequence] )
       #endif
@@ -1628,36 +1881,36 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fileSystem, diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "A",
+                    path: "/A",
+                    packageKind: .root,
+                    packageLocation: "/A",
                     platforms: [
                         PlatformDescription(name: "macos", version: "10.13"),
                         PlatformDescription(name: "ios", version: "10"),
                     ],
-                    path: "/A",
-                    url: "/A",
                     v: .v5,
-                    packageKind: .root,
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/B", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/B", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     targets: [
                         TargetDescription(name: "ATarget", dependencies: ["BLibrary"]),
                     ]),
                 Manifest.createManifest(
                     name: "B",
+                    path: "/B",
+                    packageKind: .local,
+                    packageLocation: "/B",
                     platforms: [
                         PlatformDescription(name: "macos", version: "10.14"),
                         PlatformDescription(name: "ios", version: "11"),
                     ],
-                    path: "/B",
-                    url: "/B",
                     v: .v5,
-                    packageKind: .local,
                     products: [
-                        ProductDescription(name: "BLibrary", targets: ["BTarget"]),
+                        ProductDescription(name: "BLibrary", type: .library(.automatic), targets: ["BTarget"]),
                     ],
                     targets: [
                         TargetDescription(name: "BTarget", dependencies: []),
@@ -1699,14 +1952,14 @@ final class BuildPlanTests: XCTestCase {
         let aManifest = Manifest.createManifest(
             name: "A",
             path: "/A",
-            url: "/A",
-            v: .v5,
             packageKind: .root,
+            packageLocation: "/A",
+            v: .v5,
             dependencies: [
-                PackageDependencyDescription(name: nil, url: "/B", requirement: .upToNextMajor(from: "1.0.0")),
+                .scm(location: "/B", requirement: .upToNextMajor(from: "1.0.0")),
             ],
             targets: [
-                TargetDescription(
+                try TargetDescription(
                     name: "cbar",
                     settings: [
                     .init(tool: .c, name: .headerSearchPath, value: ["Sources/headers"]),
@@ -1715,11 +1968,13 @@ final class BuildPlanTests: XCTestCase {
                     .init(tool: .c, name: .define, value: ["CCC=2"]),
                     .init(tool: .cxx, name: .define, value: ["RCXX"], condition: .init(config: "release")),
 
+                    .init(tool: .linker, name: .linkedFramework, value: ["best"]),
+
                     .init(tool: .c, name: .unsafeFlags, value: ["-Icfoo", "-L", "cbar"]),
                     .init(tool: .cxx, name: .unsafeFlags, value: ["-Icxxfoo", "-L", "cxxbar"]),
                     ]
                 ),
-                TargetDescription(
+                try TargetDescription(
                     name: "bar", dependencies: ["cbar", "Dep"],
                     settings: [
                     .init(tool: .swift, name: .define, value: ["LINUX"], condition: .init(platformNames: ["linux"])),
@@ -1728,7 +1983,7 @@ final class BuildPlanTests: XCTestCase {
                     .init(tool: .swift, name: .unsafeFlags, value: ["-Isfoo", "-L", "sbar"]),
                     ]
                 ),
-                TargetDescription(
+                try TargetDescription(
                     name: "exe", dependencies: ["bar"],
                     settings: [
                     .init(tool: .swift, name: .define, value: ["FOO"]),
@@ -1744,21 +1999,21 @@ final class BuildPlanTests: XCTestCase {
         let bManifest = Manifest.createManifest(
             name: "B",
             path: "/B",
-            url: "/B",
-            v: .v5,
             packageKind: .local,
+            packageLocation: "/B",
+            v: .v5,
             products: [
-                ProductDescription(name: "Dep", targets: ["t1", "t2"]),
+                ProductDescription(name: "Dep", type: .library(.automatic), targets: ["t1", "t2"]),
             ],
             targets: [
-                TargetDescription(
+                try TargetDescription(
                     name: "t1",
                     settings: [
                         .init(tool: .swift, name: .define, value: ["DEP"]),
                         .init(tool: .linker, name: .linkedLibrary, value: ["libz"]),
                     ]
                 ),
-                TargetDescription(
+                try TargetDescription(
                     name: "t2",
                     settings: [
                         .init(tool: .linker, name: .linkedLibrary, value: ["libz"]),
@@ -1767,12 +2022,12 @@ final class BuildPlanTests: XCTestCase {
             ])
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [aManifest, bManifest]
         )
         XCTAssertNoDiagnostics(diagnostics)
 
-        func createResult(for dest: Triple) throws -> BuildPlanResult {
+        func createResult(for dest: TSCUtility.Triple) throws -> BuildPlanResult {
             return BuildPlanResult(plan: try BuildPlan(
                 buildParameters: mockBuildParameters(destinationTriple: dest),
                 graph: graph, diagnostics: diagnostics,
@@ -1796,7 +2051,7 @@ final class BuildPlanTests: XCTestCase {
             XCTAssertMatch(exe, [.anySequence, "-DFOO", .end])
 
             let linkExe = try result.buildProduct(for: "exe").linkArguments()
-            XCTAssertMatch(linkExe, [.anySequence, "-lsqlite3", "-llibz", "-Ilfoo", "-L", "lbar", .end])
+            XCTAssertMatch(linkExe, [.anySequence, "-lsqlite3", "-llibz", "-framework", "best", "-Ilfoo", "-L", "lbar", .end])
         }
 
         do {
@@ -1809,10 +2064,10 @@ final class BuildPlanTests: XCTestCase {
             XCTAssertMatch(bar, [.anySequence, "-DDMACOS", "-Isfoo", "-L", "sbar", .end])
 
             let exe = try result.target(for: "exe").swiftTarget().compileArguments()
-            XCTAssertMatch(exe, [.anySequence, "-DFOO", "-framework", "CoreData", .end])
+            XCTAssertMatch(exe, [.anySequence, "-DFOO", .end])
 
             let linkExe = try result.buildProduct(for: "exe").linkArguments()
-            XCTAssertMatch(linkExe, [.anySequence, "-lsqlite3", "-llibz", "-framework", "CoreData", "-Ilfoo", "-L", "lbar", .anySequence])
+            XCTAssertMatch(linkExe, [.anySequence, "-lsqlite3", "-llibz", "-framework", "CoreData", "-framework", "best", "-Ilfoo", "-L", "lbar", .anySequence])
         }
     }
 
@@ -1826,16 +2081,16 @@ final class BuildPlanTests: XCTestCase {
         let aManifest = Manifest.createManifest(
             name: "A",
             path: "/A",
-            url: "/A",
-            v: .v5,
             packageKind: .root,
+            packageLocation: "/A",
+            v: .v5,
             targets: [
-                TargetDescription(name: "exe", dependencies: []),
+                try TargetDescription(name: "exe", dependencies: []),
             ]
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [aManifest]
         )
         XCTAssertNoDiagnostics(diagnostics)
@@ -1860,15 +2115,15 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "PkgA",
                     path: "/PkgA",
-                    url: "/PkgA",
                     packageKind: .local,
+                    packageLocation: "/PkgA",
                     products: [
-                        ProductDescription(name: "swiftlib", targets: ["swiftlib"]),
+                        ProductDescription(name: "swiftlib", type: .library(.automatic), targets: ["swiftlib"]),
                         ProductDescription(name: "exe", type: .executable, targets: ["exe"])
                     ],
                     targets: [
@@ -1878,10 +2133,10 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "PkgB",
                     path: "/PkgB",
-                    url: "/PkgB",
                     packageKind: .root,
+                    packageLocation: "/PkgB",
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/PkgA", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/PkgA", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     targets: [
                         TargetDescription(name: "PkgB", dependencies: ["swiftlib"]),
@@ -1893,7 +2148,7 @@ final class BuildPlanTests: XCTestCase {
 
         let plan = try BuildPlan(buildParameters: mockBuildParameters(), graph: graph, diagnostics: diagnostics, fileSystem: fs)
 
-        mktmpdir { path in
+        try testWithTemporaryDirectory { path in
             let yaml = path.appending(component: "debug.yaml")
             let llbuild = LLBuildManifestBuilder(plan)
             try llbuild.generateManifest(at: yaml)
@@ -1913,13 +2168,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "PkgA",
                     path: "/PkgA",
-                    url: "/PkgA",
                     packageKind: .root,
+                    packageLocation: "/PkgA",
                     targets: [
                         TargetDescription(name: "Foo", dependencies: []),
                         TargetDescription(name: "Bar", dependencies: ["Foo"]),
@@ -1945,7 +2200,7 @@ final class BuildPlanTests: XCTestCase {
           XCTAssertNoMatch(barTarget, [.anySequence, "-fmodule-map-file=/path/to/build/debug/Foo.build/module.modulemap", .anySequence])
         #endif
 
-        mktmpdir { path in
+        try testWithTemporaryDirectory { path in
             let yaml = path.appending(component: "debug.yaml")
             let llbuild = LLBuildManifestBuilder(plan)
             try llbuild.generateManifest(at: yaml)
@@ -1968,15 +2223,15 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "PkgA",
                     path: "/PkgA",
-                    url: "/PkgA",
                     packageKind: .root,
+                    packageLocation: "/PkgA",
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/PkgB", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/PkgB", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     targets: [
                         TargetDescription(name: "Bar", dependencies: ["Foo"]),
@@ -1984,10 +2239,10 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "PkgB",
                     path: "/PkgB",
-                    url: "/PkgB",
                     packageKind: .local,
+                    packageLocation: "/PkgB",
                     products: [
-                        ProductDescription(name: "Foo", targets: ["Foo"]),
+                        ProductDescription(name: "Foo", type: .library(.automatic), targets: ["Foo"]),
                     ],
                     targets: [
                         TargetDescription(name: "Foo", dependencies: []),
@@ -2013,7 +2268,7 @@ final class BuildPlanTests: XCTestCase {
            XCTAssertNoMatch(barTarget, [.anySequence, "-fmodule-map-file=/path/to/build/debug/Foo.build/module.modulemap", .anySequence])
          #endif
 
-         mktmpdir { path in
+        try testWithTemporaryDirectory { path in
              let yaml = path.appending(component: "debug.yaml")
              let llbuild = LLBuildManifestBuilder(plan)
              try llbuild.generateManifest(at: yaml)
@@ -2036,15 +2291,15 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "PkgA",
                     path: "/PkgA",
-                    url: "/PkgA",
                     packageKind: .root,
+                    packageLocation: "/PkgA",
                     dependencies: [
-                        PackageDependencyDescription(name: nil, url: "/PkgB", requirement: .upToNextMajor(from: "1.0.0")),
+                        .scm(location: "/PkgB", requirement: .upToNextMajor(from: "1.0.0")),
                     ],
                     targets: [
                         TargetDescription(name: "Bar", dependencies: ["Foo"]),
@@ -2052,8 +2307,8 @@ final class BuildPlanTests: XCTestCase {
                 Manifest.createV4Manifest(
                     name: "PkgB",
                     path: "/PkgB",
-                    url: "/PkgB",
                     packageKind: .local,
+                    packageLocation: "/PkgB",
                     products: [
                         ProductDescription(name: "Foo", type: .library(.dynamic), targets: ["Foo"]),
                     ],
@@ -2082,7 +2337,7 @@ final class BuildPlanTests: XCTestCase {
            XCTAssertNoMatch(barTarget, [.anySequence, "-fmodule-map-file=/path/to/build/debug/Foo.build/module.modulemap", .anySequence])
          #endif
 
-         mktmpdir { path in
+        try testWithTemporaryDirectory { path in
              let yaml = path.appending(component: "debug.yaml")
              let llbuild = LLBuildManifestBuilder(plan)
              try llbuild.generateManifest(at: yaml)
@@ -2104,13 +2359,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     targets: [
                         TargetDescription(name: "exe", dependencies: ["lib"]),
                         TargetDescription(name: "lib", dependencies: []),
@@ -2129,7 +2384,7 @@ final class BuildPlanTests: XCTestCase {
         XCTAssertTrue(objects.contains(AbsolutePath("/path/to/build/debug/exe.build/exe.swiftmodule.o")), objects.description)
         XCTAssertTrue(objects.contains(AbsolutePath("/path/to/build/debug/lib.build/lib.swiftmodule.o")), objects.description)
 
-        mktmpdir { path in
+        try testWithTemporaryDirectory { path in
             let yaml = path.appending(component: "debug.yaml")
             let llbuild = LLBuildManifestBuilder(result.plan)
             try llbuild.generateManifest(at: yaml)
@@ -2137,10 +2392,10 @@ final class BuildPlanTests: XCTestCase {
             XCTAssertMatch(contents, .contains("""
                   "/path/to/build/debug/exe.build/exe.swiftmodule.o":
                     tool: shell
-                    inputs: ["/path/to/build/debug/exe.swiftmodule"]
+                    inputs: ["/path/to/build/debug/exe.build/exe.swiftmodule"]
                     outputs: ["/path/to/build/debug/exe.build/exe.swiftmodule.o"]
                     description: "Wrapping AST for exe for debugging"
-                    args: ["/fake/path/to/swiftc","-modulewrap","/path/to/build/debug/exe.swiftmodule","-o","/path/to/build/debug/exe.build/exe.swiftmodule.o","-target","x86_64-unknown-linux-gnu"]
+                    args: ["/fake/path/to/swiftc","-modulewrap","/path/to/build/debug/exe.build/exe.swiftmodule","-o","/path/to/build/debug/exe.build/exe.swiftmodule.o","-target","x86_64-unknown-linux-gnu"]
                 """))
             XCTAssertMatch(contents, .contains("""
                   "/path/to/build/debug/lib.build/lib.swiftmodule.o":
@@ -2164,16 +2419,16 @@ final class BuildPlanTests: XCTestCase {
 
         let diagnostics = DiagnosticsEngine()
 
-        let graph = loadPackageGraph(
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createManifest(
                     name: "PkgA",
                     path: "/PkgA",
-                    url: "/PkgA",
-                    v: .v5_2,
                     packageKind: .root,
+                    packageLocation: "/PkgA",
+                    v: .v5_2,
                     targets: [
                         TargetDescription(
                             name: "Foo",
@@ -2209,6 +2464,9 @@ final class BuildPlanTests: XCTestCase {
         let resourceAccessor = fooTarget.sources.first{ $0.basename == "resource_bundle_accessor.swift" }!
         let contents = try fs.readFileContents(resourceAccessor).cString
         XCTAssertTrue(contents.contains("extension Foundation.Bundle"), contents)
+        // Assert that `Bundle.main` is executed in the compiled binary (and not during compilation)
+        // See https://bugs.swift.org/browse/SR-14555 and https://github.com/apple/swift-package-manager/pull/2972/files#r623861646
+        XCTAssertTrue(contents.contains("let mainPath = Bundle.main."), contents)
 
         let barTarget = try result.target(for: "Bar").swiftTarget()
         XCTAssertEqual(barTarget.objects.map{ $0.pathString }, [
@@ -2216,7 +2474,44 @@ final class BuildPlanTests: XCTestCase {
         ])
     }
 
-    func testBinaryTargets() throws {
+    func testShouldLinkStaticSwiftStdlib() throws {
+        let fs = InMemoryFileSystem(emptyFiles:
+            "/Pkg/Sources/exe/main.swift",
+            "/Pkg/Sources/lib/lib.swift"
+        )
+
+        let diagnostics = DiagnosticsEngine()
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
+            manifests: [
+                Manifest.createV4Manifest(
+                    name: "Pkg",
+                    path: "/Pkg",
+                    packageKind: .root,
+                    packageLocation: "/Pkg",
+                    targets: [
+                        TargetDescription(name: "exe", dependencies: ["lib"]),
+                        TargetDescription(name: "lib", dependencies: []),
+                    ]),
+            ]
+        )
+
+        let supportingTriples: [TSCUtility.Triple] = [.x86_64Linux, .arm64Linux, .wasi]
+        for triple in supportingTriples {
+            let result = BuildPlanResult(plan: try BuildPlan(
+                buildParameters: mockBuildParameters(shouldLinkStaticSwiftStdlib: true, destinationTriple: triple),
+                graph: graph, diagnostics: diagnostics, fileSystem: fs)
+            )
+
+            let exe = try result.target(for: "exe").swiftTarget().compileArguments()
+            XCTAssertTrue(exe.contains("-static-stdlib"))
+            let lib = try result.target(for: "lib").swiftTarget().compileArguments()
+            XCTAssertTrue(lib.contains("-static-stdlib"))
+            let link = try result.buildProduct(for: "exe").linkArguments()
+            XCTAssertTrue(link.contains("-static-stdlib"))
+        }
+    }
+
+    func testXCFrameworkBinaryTargets(platform: String, arch: String, destinationTriple: TSCUtility.Triple) throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Pkg/Sources/exe/main.swift",
             "/Pkg/Sources/Library/Library.swift",
@@ -2236,15 +2531,15 @@ final class BuildPlanTests: XCTestCase {
                     <array>
                         <dict>
                             <key>LibraryIdentifier</key>
-                            <string>macos-x86_64</string>
+                            <string>\(platform)-\(arch)</string>
                             <key>LibraryPath</key>
                             <string>Framework.framework</string>
                             <key>SupportedArchitectures</key>
                             <array>
-                                <string>x86_64</string>
+                                <string>\(arch)</string>
                             </array>
                             <key>SupportedPlatform</key>
-                            <string>macos</string>
+                            <string>\(platform)</string>
                         </dict>
                     </array>
                     <key>CFBundlePackageType</key>
@@ -2267,17 +2562,17 @@ final class BuildPlanTests: XCTestCase {
                     <array>
                         <dict>
                             <key>LibraryIdentifier</key>
-                            <string>macos-x86_64</string>
+                            <string>\(platform)-\(arch)</string>
                             <key>HeadersPath</key>
                             <string>Headers</string>
                             <key>LibraryPath</key>
                             <string>libStaticLibrary.a</string>
                             <key>SupportedArchitectures</key>
                             <array>
-                                <string>x86_64</string>
+                                <string>\(arch)</string>
                             </array>
                             <key>SupportedPlatform</key>
-                            <string>macos</string>
+                            <string>\(platform)</string>
                         </dict>
                     </array>
                     <key>CFBundlePackageType</key>
@@ -2289,15 +2584,16 @@ final class BuildPlanTests: XCTestCase {
                 """))
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(
+        
+        let graph = try loadPackageGraph(
             fs: fs,
             diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     products: [
                         ProductDescription(name: "exe", type: .executable, targets: ["exe"]),
                         ProductDescription(name: "Library", type: .library(.dynamic), targets: ["Library"]),
@@ -2311,12 +2607,16 @@ final class BuildPlanTests: XCTestCase {
                         TargetDescription(name: "StaticLibrary", path: "StaticLibrary.xcframework", type: .binary),
                     ]
                 ),
+            ],
+            binaryArtifacts: [
+                .init(kind: .xcframework, originURL: nil, path: AbsolutePath("/Pkg/Framework.xcframework")),
+                .init(kind: .xcframework, originURL: nil, path: AbsolutePath("/Pkg/StaticLibrary.xcframework"))
             ]
         )
         XCTAssertNoDiagnostics(diagnostics)
 
         let result = BuildPlanResult(plan: try BuildPlan(
-            buildParameters: mockBuildParameters(destinationTriple: .macOS),
+            buildParameters: mockBuildParameters(destinationTriple: destinationTriple),
             graph: graph,
             diagnostics: diagnostics,
             fileSystem: fs
@@ -2344,7 +2644,7 @@ final class BuildPlanTests: XCTestCase {
 
         let clibraryBasicArguments = try result.target(for: "CLibrary").clangTarget().basicArguments()
         XCTAssertMatch(clibraryBasicArguments, [.anySequence, "-F", "/path/to/build/debug", .anySequence])
-        XCTAssertMatch(clibraryBasicArguments, [.anySequence, "-I", "/Pkg/StaticLibrary.xcframework/macos-x86_64/Headers", .anySequence])
+        XCTAssertMatch(clibraryBasicArguments, [.anySequence, "-I", "/Pkg/StaticLibrary.xcframework/\(platform)-\(arch)/Headers", .anySequence])
 
         let clibraryLinkArguments = try result.buildProduct(for: "CLibrary").linkArguments()
         XCTAssertMatch(clibraryLinkArguments, [.anySequence, "-F", "/path/to/build/debug", .anySequence])
@@ -2356,6 +2656,97 @@ final class BuildPlanTests: XCTestCase {
         
         let dynamicLibraryPathExtension = try result.buildProduct(for: "Library").binary.extension
         XCTAssertMatch(dynamicLibraryPathExtension, "dylib")
+    }
+
+    func testXCFrameworkBinaryTargets() throws {
+        try testXCFrameworkBinaryTargets(platform: "macos", arch: "x86_64", destinationTriple: .macOS)
+
+        let arm64Triple = try TSCUtility.Triple("arm64-apple-macosx")
+        try testXCFrameworkBinaryTargets(platform: "macos", arch: "arm64", destinationTriple: arm64Triple)
+
+        let arm64eTriple = try TSCUtility.Triple("arm64e-apple-macosx")
+        try testXCFrameworkBinaryTargets(platform: "macos", arch: "arm64e", destinationTriple: arm64eTriple)
+    }
+
+    func testArtifactsArchiveBinaryTargets(artifactTriples:[TSCUtility.Triple], destinationTriple: TSCUtility.Triple) throws -> Bool {
+        let fs = InMemoryFileSystem(emptyFiles: "/Pkg/Sources/exe/main.swift")
+
+        let artifactName = "my-tool"
+        let toolPath = AbsolutePath("/Pkg/MyTool.artifactbundle")
+        try fs.createDirectory(toolPath, recursive: true)
+
+        try fs.writeFileContents(
+            toolPath.appending(component: "info.json"),
+            bytes: ByteString(encodingAsUTF8: """
+                {
+                    "schemaVersion": "1.0",
+                    "artifacts": {
+                        "\(artifactName)": {
+                            "type": "executable",
+                            "version": "1.1.0",
+                            "variants": [
+                                {
+                                    "path": "all-platforms/mytool",
+                                    "supportedTriples": ["\(artifactTriples.map{ $0.tripleString }.joined(separator: "\", \""))"]
+                                }
+                            ]
+                        }
+                    }
+                }
+        """))
+
+        let diagnostics = DiagnosticsEngine()
+        let graph = try loadPackageGraph(
+            fs: fs,
+            diagnostics: diagnostics,
+            manifests: [
+                Manifest.createV4Manifest(
+                    name: "Pkg",
+                    path: "/Pkg",
+                    packageKind: .root,
+                    packageLocation: "/Pkg",
+                    products: [
+                        ProductDescription(name: "exe", type: .executable, targets: ["exe"]),
+                    ],
+                    targets: [
+                        TargetDescription(name: "exe", dependencies: ["MyTool"]),
+                        TargetDescription(name: "MyTool", path: "MyTool.artifactbundle", type: .binary),
+                    ]
+                ),
+            ],
+            binaryArtifacts: [
+                .init(kind: .artifactsArchive, originURL: nil, path: toolPath),
+            ]
+        )
+
+        XCTAssertNoDiagnostics(diagnostics)
+        let result = BuildPlanResult(plan: try BuildPlan(
+            buildParameters: mockBuildParameters(destinationTriple: destinationTriple),
+            graph: graph,
+            diagnostics: diagnostics,
+            fileSystem: fs
+        ))
+        XCTAssertNoDiagnostics(diagnostics)
+
+        result.checkProductsCount(1)
+        result.checkTargetsCount(1)
+
+        let availableTools = try result.buildProduct(for: "exe").availableTools
+        return availableTools.contains(where: { $0.key == artifactName })
+    }
+
+    func testArtifactsArchiveBinaryTargets() throws {
+        XCTAssertTrue(try testArtifactsArchiveBinaryTargets(artifactTriples: [.macOS], destinationTriple: .macOS))
+
+        do {
+            let triples = try ["arm64-apple-macosx",  "x86_64-apple-macosx", "x86_64-unknown-linux-gnu"].map(TSCUtility.Triple.init)
+            XCTAssertTrue(try testArtifactsArchiveBinaryTargets(artifactTriples: triples, destinationTriple: triples.first!))
+        }
+
+        do {
+            let triples = try ["x86_64-unknown-linux-gnu"].map(TSCUtility.Triple.init)
+            XCTAssertFalse(try testArtifactsArchiveBinaryTargets(artifactTriples: triples, destinationTriple: .macOS))
+        }
     }
 
     func testAddressSanitizer() throws {
@@ -2374,7 +2765,7 @@ final class BuildPlanTests: XCTestCase {
         try sanitizerTest(.scudo, expectedName: "scudo")
     }
 
-    private func sanitizerTest(_ sanitizer: Sanitizer, expectedName: String) throws {
+    private func sanitizerTest(_ sanitizer: SPMBuildCore.Sanitizer, expectedName: String) throws {
         let fs = InMemoryFileSystem(emptyFiles:
             "/Pkg/Sources/exe/main.swift",
             "/Pkg/Sources/lib/lib.swift",
@@ -2383,13 +2774,13 @@ final class BuildPlanTests: XCTestCase {
         )
 
         let diagnostics = DiagnosticsEngine()
-        let graph = loadPackageGraph(fs: fs, diagnostics: diagnostics,
+        let graph = try loadPackageGraph(fs: fs, diagnostics: diagnostics,
             manifests: [
                 Manifest.createV4Manifest(
                     name: "Pkg",
                     path: "/Pkg",
-                    url: "/Pkg",
                     packageKind: .root,
+                    packageLocation: "/Pkg",
                     targets: [
                         TargetDescription(name: "exe", dependencies: ["lib", "clib"]),
                         TargetDescription(name: "lib", dependencies: []),
@@ -2488,9 +2879,10 @@ fileprivate extension TargetBuildDescription {
     }
 }
 
-fileprivate extension Triple {
+fileprivate extension TSCUtility.Triple {
     static let x86_64Linux = try! Triple("x86_64-unknown-linux-gnu")
     static let arm64Linux = try! Triple("aarch64-unknown-linux-gnu")
     static let arm64Android = try! Triple("aarch64-unknown-linux-android")
     static let windows = try! Triple("x86_64-unknown-windows-msvc")
+    static let wasi = try! Triple("wasm32-unknown-wasi")
 }

@@ -8,8 +8,10 @@
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
  */
 
+import Basics
 import Foundation
 import TSCBasic
+import PackageModel
 
 /// The Project Interchange Format (PIF) is a structured representation of the
 /// project model created by clients (Xcode/SwiftPM) to send to XCBuild.
@@ -227,7 +229,7 @@ public enum PIF {
                 case "standard", "packageProduct":
                     return try targetContainer.decode(Target.self)
                 default:
-                    fatalError("unknown target type \(type)")
+                    throw InternalError("unknown target type \(type)")
                 }
             }
 
@@ -387,7 +389,7 @@ public enum PIF {
                 case FileReference.type:
                     return try childrenContainer.decode(FileReference.self)
                 default:
-                    fatalError("unknown reference type \(child.type ?? "<nil>")")
+                    throw InternalError("unknown reference type \(child.type ?? "<nil>")")
                 }
             }
 
@@ -460,7 +462,7 @@ public enum PIF {
         }
 
         public required init(from decoder: Decoder) throws {
-            fatalError("init(from:) has not been implemented")
+            throw InternalError("init(from:) has not been implemented")
         }
     }
 
@@ -521,7 +523,7 @@ public enum PIF {
 
             let buildPhases: [BuildPhase] = try untypedBuildPhases.map {
                 guard let type = $0.type else {
-                    fatalError("Expected type in build phase \($0)")
+                    throw InternalError("Expected type in build phase \($0)")
                 }
                 return try BuildPhase.decode(container: &buildPhasesContainer, type: type)
             }
@@ -656,14 +658,14 @@ public enum PIF {
 
                 buildPhases = try untypedBuildPhases.map {
                     guard let type = $0.type else {
-                        fatalError("Expected type in build phase \($0)")
+                        throw InternalError("Expected type in build phase \($0)")
                     }
                     return try BuildPhase.decode(container: &buildPhasesContainer, type: type)
                 }
 
                 impartedBuildProperties = try container.decode(BuildSettings.self, forKey: .impartedBuildProperties)
             } else {
-                fatalError("Unhandled target type \(type)")
+                throw InternalError("Unhandled target type \(type)")
             }
 
             super.init(
@@ -691,7 +693,7 @@ public enum PIF {
             case ResourcesBuildPhase.type:
                 return try container.decode(ResourcesBuildPhase.self)
             default:
-                fatalError("unknown build phase \(type)")
+                throw InternalError("unknown build phase \(type)")
             }
         }
 
@@ -822,7 +824,7 @@ public enum PIF {
                 let targetGUID = String(targetGUIDString.dropLast("\(schemaVersion)".count + 1))
                 reference = .target(guid: targetGUID)
             } else {
-                fatalError("Expected \(CodingKeys.fileReference) or \(CodingKeys.targetReference) in the keys")
+                throw InternalError("Expected \(CodingKeys.fileReference) or \(CodingKeys.targetReference) in the keys")
             }
         }
     }
@@ -884,6 +886,7 @@ public enum PIF {
             case COPY_PHASE_STRIP
             case DEBUG_INFORMATION_FORMAT
             case DEFINES_MODULE
+            case DRIVERKIT_DEPLOYMENT_TARGET
             case DYLIB_INSTALL_NAME_BASE
             case EMBEDDED_CONTENT_CONTAINS_SWIFT
             case ENABLE_NS_ASSERTIONS
@@ -955,29 +958,50 @@ public enum PIF {
 
         public enum Platform: String, CaseIterable, Codable {
             case macOS = "macos"
+            case macCatalyst = "maccatalyst"
             case iOS = "ios"
             case tvOS = "tvos"
             case watchOS = "watchos"
+            case driverKit = "driverkit"
             case linux
 
-            public var conditions: [String] {
+            public var packageModelPlatform: PackageModel.Platform {
                 switch self {
-                case .macOS: return ["sdk=macosx*"]
-                case .iOS: return ["sdk=iphonesimulator*", "sdk=iphoneos*"]
-                case .tvOS: return ["sdk=appletvsimulator*", "sdk=appletvos*"]
-                case .watchOS: return ["sdk=watchsimulator*", "sdk=watchos*"]
-                case .linux: return ["sdk=linux*"]
+                case .macOS: return .macOS
+                case .macCatalyst: return .macCatalyst
+                case .iOS: return .iOS
+                case .tvOS: return .tvOS
+                case .watchOS: return .watchOS
+                case .driverKit: return .driverKit
+                case .linux: return .linux
                 }
+            }
+
+            public var conditions: [String] {
+                let filters = [PlatformsCondition(platforms: [packageModelPlatform])].toPlatformFilters().map { (filter: PIF.PlatformFilter) -> String in
+                    if filter.environment.isEmpty {
+                        return filter.platform
+                    } else {
+                        return "\(filter.platform)-\(filter.environment)"
+                    }
+                }.sorted()
+                return ["__platform_filter=\(filters.joined(separator: ";"))"]
             }
         }
 
-        public private(set) var platformSpecificSettings = [Platform: [MultipleValueSetting: [String]]]()
+        public private(set) var platformSpecificSingleValueSettings = [Platform: [SingleValueSetting: String]]()
+        public private(set) var platformSpecificMultipleValueSettings = [Platform: [MultipleValueSetting: [String]]]()
         public private(set) var singleValueSettings: [SingleValueSetting: String] = [:]
         public private(set) var multipleValueSettings: [MultipleValueSetting: [String]] = [:]
 
         public subscript(_ setting: SingleValueSetting) -> String? {
             get { singleValueSettings[setting] }
             set { singleValueSettings[setting] = newValue }
+        }
+
+        public subscript(_ setting: SingleValueSetting, for platform: Platform) -> String? {
+            get { platformSpecificSingleValueSettings[platform]?[setting] }
+            set { platformSpecificSingleValueSettings[platform, default: [:]][setting] = newValue }
         }
 
         public subscript(_ setting: SingleValueSetting, default defaultValue: @autoclosure () -> String) -> String {
@@ -991,8 +1015,8 @@ public enum PIF {
         }
 
         public subscript(_ setting: MultipleValueSetting, for platform: Platform) -> [String]? {
-            get { platformSpecificSettings[platform]?[setting] }
-            set { platformSpecificSettings[platform, default: [:]][setting] = newValue }
+            get { platformSpecificMultipleValueSettings[platform]?[setting] }
+            set { platformSpecificMultipleValueSettings[platform, default: [:]][setting] = newValue }
         }
 
         public subscript(
@@ -1008,15 +1032,15 @@ public enum PIF {
             for platform: Platform,
             default defaultValue: @autoclosure () -> [String]
         ) -> [String] {
-            get { platformSpecificSettings[platform, default: [:]][setting, default: defaultValue()] }
-            set { platformSpecificSettings[platform, default: [:]][setting] = newValue }
+            get { platformSpecificMultipleValueSettings[platform, default: [:]][setting, default: defaultValue()] }
+            set { platformSpecificMultipleValueSettings[platform, default: [:]][setting] = newValue }
         }
 
         public init() {
         }
 
         private enum CodingKeys: CodingKey {
-            case platformSpecificSettings, singleValueSettings, multipleValueSettings
+            case platformSpecificSingleValueSettings, platformSpecificMultipleValueSettings, singleValueSettings, multipleValueSettings
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -1025,7 +1049,8 @@ public enum PIF {
             }
 
             var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encode(platformSpecificSettings, forKey: .platformSpecificSettings)
+            try container.encode(platformSpecificSingleValueSettings, forKey: .platformSpecificSingleValueSettings)
+            try container.encode(platformSpecificMultipleValueSettings, forKey: .platformSpecificMultipleValueSettings)
             try container.encode(singleValueSettings, forKey: .singleValueSettings)
             try container.encode(multipleValueSettings, forKey: .multipleValueSettings)
         }
@@ -1041,7 +1066,15 @@ public enum PIF {
                 try container.encode(value, forKey: StringKey(key.rawValue))
             }
 
-            for (platform, values) in platformSpecificSettings {
+            for (platform, values) in platformSpecificSingleValueSettings {
+                for condition in platform.conditions {
+                    for (key, value) in values {
+                        try container.encode(value, forKey: "\(key.rawValue)[\(condition)]")
+                    }
+                }
+            }
+
+            for (platform, values) in platformSpecificMultipleValueSettings {
                 for condition in platform.conditions {
                     for (key, value) in values {
                         try container.encode(value, forKey: "\(key.rawValue)[\(condition)]")
@@ -1053,7 +1086,8 @@ public enum PIF {
         public init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
 
-            platformSpecificSettings = try container.decodeIfPresent([Platform: [MultipleValueSetting: [String]]].self, forKey: .platformSpecificSettings) ?? .init()
+            platformSpecificSingleValueSettings = try container.decodeIfPresent([Platform: [SingleValueSetting: String]].self, forKey: .platformSpecificSingleValueSettings) ?? .init()
+            platformSpecificMultipleValueSettings = try container.decodeIfPresent([Platform: [MultipleValueSetting: [String]]].self, forKey: .platformSpecificMultipleValueSettings) ?? .init()
             singleValueSettings = try container.decodeIfPresent([SingleValueSetting: String].self, forKey: .singleValueSettings) ?? [:]
             multipleValueSettings = try container.decodeIfPresent([MultipleValueSetting: [String]] .self, forKey: .multipleValueSettings) ?? [:]
         }
@@ -1113,7 +1147,8 @@ struct StringKey: CodingKey, ExpressibleByStringInterpolation {
     }
 
     init?(intValue: Int) {
-        fatalError("does not support integer keys")
+        assertionFailure("does not support integer keys")
+        return nil
     }
 }
 
@@ -1188,7 +1223,7 @@ private struct UntypedTarget: Decodable {
     let contents: TargetContents
 }
 
-protocol PIFSignableObject: class {
+protocol PIFSignableObject: AnyObject {
     var signature: String? { get set }
 }
 extension PIF.Workspace: PIFSignableObject {}
@@ -1198,17 +1233,12 @@ extension PIF.BaseTarget: PIFSignableObject {}
 extension PIF {
     /// Add signature to workspace and its subobjects.
     public static func sign(_ workspace: PIF.Workspace) throws {
-        let encoder = JSONEncoder()
-        #if os(macOS)
-        if #available(OSX 10.13, *) {
-            encoder.outputFormatting = [.sortedKeys]
-        }
-        #endif
+        let encoder = JSONEncoder.makeWithDefaults()
 
         func sign<T: PIFSignableObject & Encodable>(_ obj: T) throws {
             let signatureContent = try encoder.encode(obj)
             let bytes = ByteString(signatureContent)
-            obj.signature = SHA256().hash(bytes).hexadecimalRepresentation
+            obj.signature = bytes.sha256Checksum
         }
 
         let projects = workspace.projects

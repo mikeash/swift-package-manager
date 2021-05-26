@@ -8,13 +8,13 @@
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
 */
 
-import XCTest
-
-import TSCBasic
-import TSCUtility
-import SPMTestSupport
+import Basics
 import PackageModel
 import PackageLoading
+import SPMTestSupport
+import TSCBasic
+import TSCUtility
+import XCTest
 
 class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
     override var toolsVersion: ToolsVersion {
@@ -62,8 +62,8 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
             XCTAssertEqual(bar.dependencies, ["foo"])
 
             // Check dependencies.
-            let deps = Dictionary(uniqueKeysWithValues: manifest.dependencies.map{ ($0.url, $0) })
-            XCTAssertEqual(deps["/foo1"], PackageDependencyDescription(name: nil, url: "/foo1", requirement: .upToNextMajor(from: "1.0.0")))
+            let deps = Dictionary(uniqueKeysWithValues: manifest.dependencies.map{ ($0.identity.description, $0) })
+            XCTAssertEqual(deps["foo1"], .scm(location: "/foo1", requirement: .upToNextMajor(from: "1.0.0")))
 
             // Check products.
             let products = Dictionary(uniqueKeysWithValues: manifest.products.map{ ($0.name, $0) })
@@ -98,7 +98,7 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
             guard case let ManifestParseError.invalidManifestFormat(output, _) = error else {
                 return XCTFail()
             }
-            XCTAssertMatch(output, .and(.or(.contains("expected argument type"), .contains("expected element type")), .contains("SwiftVersion")))
+            XCTAssertMatch(output, .and(.contains("'init(name:pkgConfig:providers:products:dependencies:targets:swiftLanguageVersions:cLanguageStandard:cxxLanguageStandard:)' is unavailable"), .contains("was obsoleted in PackageDescription 4.2")))
         }
 
         // Check when Swift language versions is empty.
@@ -248,38 +248,64 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
                    .package(path: "~foo11"),
                    .package(path: "~/path/to/~/foo12"),
                    .package(path: "~"),
+                   .package(path: "file:///path/to/foo13"),
+
                ]
             )
             """
        loadManifest(stream.bytes) { manifest in
-            let deps = Dictionary(uniqueKeysWithValues: manifest.dependencies.map{ ($0.url, $0) })
-            XCTAssertEqual(deps["/foo1"], PackageDependencyDescription(name: nil, url: "/foo1", requirement: .upToNextMajor(from: "1.0.0")))
-            XCTAssertEqual(deps["/foo2"], PackageDependencyDescription(name: nil, url: "/foo2", requirement: .revision("58e9de4e7b79e67c72a46e164158e3542e570ab6")))
+            let deps = Dictionary(uniqueKeysWithValues: manifest.dependencies.map{ ($0.identity.description, $0) })
+            XCTAssertEqual(deps["foo1"], .scm(location: "/foo1", requirement: .upToNextMajor(from: "1.0.0")))
+            XCTAssertEqual(deps["foo2"], .scm(location: "/foo2", requirement: .revision("58e9de4e7b79e67c72a46e164158e3542e570ab6")))
 
-            XCTAssertEqual(deps["/foo3"]?.url, "/foo3")
-            XCTAssertEqual(deps["/foo3"]?.requirement, .localPackage)
+            if case .local(let dep) = deps["foo3"] {
+                XCTAssertEqual(dep.path.pathString, "/foo3")
+            } else {
+                XCTFail("expected to be local dependency")
+            }
 
-            XCTAssertEqual(deps["/path/to/foo4"]?.url, "/path/to/foo4")
-            XCTAssertEqual(deps["/path/to/foo4"]?.requirement, .localPackage)
+            if case .local(let dep) = deps["foo4"] {
+                XCTAssertEqual(dep.path.pathString, "/path/to/foo4")
+            } else {
+                XCTFail("expected to be local dependency")
+            }
 
-            XCTAssertEqual(deps["/foo5"], PackageDependencyDescription(name: nil, url: "/foo5", requirement: .exact("1.2.3")))
-            XCTAssertEqual(deps["/foo6"], PackageDependencyDescription(name: nil, url: "/foo6", requirement: .range("1.2.3"..<"2.0.0")))
-            XCTAssertEqual(deps["/foo7"], PackageDependencyDescription(name: nil, url: "/foo7", requirement: .branch("master")))
-            XCTAssertEqual(deps["/foo8"], PackageDependencyDescription(name: nil, url: "/foo8", requirement: .upToNextMinor(from: "1.3.4")))
-            XCTAssertEqual(deps["/foo9"], PackageDependencyDescription(name: nil, url: "/foo9", requirement: .upToNextMajor(from: "1.3.4")))
+            XCTAssertEqual(deps["foo5"], .scm(location: "/foo5", requirement: .exact("1.2.3")))
+            XCTAssertEqual(deps["foo6"], .scm(location: "/foo6", requirement: .range("1.2.3"..<"2.0.0")))
+            XCTAssertEqual(deps["foo7"], .scm(location: "/foo7", requirement: .branch("master")))
+            XCTAssertEqual(deps["foo8"], .scm(location: "/foo8", requirement: .upToNextMinor(from: "1.3.4")))
+            XCTAssertEqual(deps["foo9"], .scm(location: "/foo9", requirement: .upToNextMajor(from: "1.3.4")))
 
             let homeDir = "/home/user"
-            XCTAssertEqual(deps["\(homeDir)/path/to/foo10"]?.url, "\(homeDir)/path/to/foo10")
-            XCTAssertEqual(deps["\(homeDir)/path/to/foo10"]?.requirement, .localPackage)
+            if case .local(let dep) = deps["foo10"] {
+                XCTAssertEqual(dep.path.pathString, "\(homeDir)/path/to/foo10")
+            } else {
+                XCTFail("expected to be local dependency")
+            }
 
-            XCTAssertEqual(deps["/foo/~foo11"]?.url, "/foo/~foo11")
-            XCTAssertEqual(deps["/foo/~foo11"]?.requirement, .localPackage)
+            if case .local(let dep) = deps["~foo11"] {
+                XCTAssertEqual(dep.path.pathString, "/foo/~foo11")
+            } else {
+                XCTFail("expected to be local dependency")
+            }
 
-            XCTAssertEqual(deps["\(homeDir)/path/to/~/foo12"]?.url, "\(homeDir)/path/to/~/foo12")
-            XCTAssertEqual(deps["\(homeDir)/path/to/~/foo12"]?.requirement, .localPackage)
+            if case .local(let dep) = deps["foo12"] {
+                XCTAssertEqual(dep.path.pathString, "\(homeDir)/path/to/~/foo12")
+            } else {
+                XCTFail("expected to be local dependency")
+            }
 
-            XCTAssertEqual(deps["/foo/~"]?.url, "/foo/~")
-            XCTAssertEqual(deps["/foo/~"]?.requirement, .localPackage)
+            if case .local(let dep) = deps["~"] {
+                XCTAssertEqual(dep.path.pathString, "/foo/~")
+            } else {
+                XCTFail("expected to be local dependency")
+            }
+
+            if case .local(let dep) = deps["foo13"] {
+                XCTAssertEqual(dep.path.pathString, "/path/to/foo13")
+            } else {
+                XCTFail("expected to be local dependency")
+            }
         }
     }
 
@@ -327,7 +353,7 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
                 "let package = Package(name: \"Trivial\")"))
 
         // Check at each possible spelling.
-        let currentVersion = Versioning.currentVersion
+        let currentVersion = SwiftVersion.currentVersion
         let possibleSuffixes = [
             "\(currentVersion.major).\(currentVersion.minor).\(currentVersion.patch)",
             "\(currentVersion.major).\(currentVersion.minor)",
@@ -351,9 +377,39 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
                     bytes: bogusManifest)
             }
             // Check we can load the repository.
-            let manifest = try manifestLoader.load(package: root, baseURL: "/foo", toolsVersion: .v4_2, packageKind: .root, fileSystem: fs)
+            let manifest = try manifestLoader.load(at: root, packageKind: .root, packageLocation: "/foo", toolsVersion: .v4_2, fileSystem: fs)
             XCTAssertEqual(manifest.name, "Trivial")
         }
+    }
+    
+    // Check that ancient `Package@swift-3.swift` manifests are properly treated as 3.1 even without a tools-version comment.
+    func testVersionSpecificLoadingOfVersion3Manifest() throws {
+        // Create a temporary FS to hold the package manifests.
+        let fs = InMemoryFileSystem()
+        
+        // Write a regular manifest with a tools version comment, and a `Package@swift-3.swift` manifest without one.
+        let packageDir = AbsolutePath.root
+        let manifestContents = "import PackageDescription\nlet package = Package(name: \"Trivial\")"
+        try fs.writeFileContents(
+            packageDir.appending(component: Manifest.basename + ".swift"),
+            bytes: ByteString(encodingAsUTF8: "// swift-tools-version:4.0\n" + manifestContents))
+        try fs.writeFileContents(
+            packageDir.appending(component: Manifest.basename + "@swift-3.swift"),
+            bytes: ByteString(encodingAsUTF8: manifestContents))
+        // Check we can load the manifest.
+        let manifest = try manifestLoader.load(at: packageDir, packageKind: .root, packageLocation: "/foo", toolsVersion: .v4_2, fileSystem: fs)
+        XCTAssertEqual(manifest.name, "Trivial")
+        
+        // Switch it around so that the main manifest is now the one that doesn't have a comment.
+        try fs.writeFileContents(
+            packageDir.appending(component: Manifest.basename + ".swift"),
+            bytes: ByteString(encodingAsUTF8: manifestContents))
+        try fs.writeFileContents(
+            packageDir.appending(component: Manifest.basename + "@swift-4.swift"),
+            bytes: ByteString(encodingAsUTF8: "// swift-tools-version:4.0\n" + manifestContents))
+        // Check we can load the manifest.
+        let manifest2 = try manifestLoader.load(at: packageDir, packageKind: .root, packageLocation: "/foo", toolsVersion: .v4_2, fileSystem: fs)
+        XCTAssertEqual(manifest2.name, "Trivial")
     }
 
     func testRuntimeManifestErrors() throws {
@@ -443,8 +499,8 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
         }
     }
 
-    func testCacheInvalidationOnEnv() {
-        mktmpdir { path in
+    func testCacheInvalidationOnEnv() throws {
+        try testWithTemporaryDirectory { path in
             let fs = localFileSystem
 
             let manifestPath = path.appending(components: "pkg", "Package.swift")
@@ -464,16 +520,16 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
 
             let delegate = ManifestTestDelegate()
 
-            let manifestLoader = ManifestLoader(
-                manifestResources: Resources.default, cacheDir: path, delegate: delegate)
+            let manifestLoader = ManifestLoader(manifestResources: Resources.default, cacheDir: path, delegate: delegate)
 
             func check(loader: ManifestLoader, expectCached: Bool) {
                 delegate.clear()
                 let manifest = try! loader.load(
-                    package: manifestPath.parentDirectory,
-                    baseURL: manifestPath.pathString,
+                    at: manifestPath.parentDirectory,
+                    packageKind: .local,
+                    packageLocation: manifestPath.pathString,
                     toolsVersion: .v4_2,
-                    packageKind: .local
+                    fileSystem: fs
                 )
 
                 XCTAssertEqual(delegate.loaded, [manifestPath])
@@ -495,13 +551,12 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
                 check(loader: manifestLoader, expectCached: true)
             }
 
-            check(loader: manifestLoader, expectCached: false)
             check(loader: manifestLoader, expectCached: true)
         }
     }
 
-    func testCaching() {
-        mktmpdir { path in
+    func testCaching() throws {
+        try testWithTemporaryDirectory { path in
             let fs = localFileSystem
 
             let manifestPath = path.appending(components: "pkg", "Package.swift")
@@ -521,16 +576,16 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
 
             let delegate = ManifestTestDelegate()
 
-            let manifestLoader = ManifestLoader(
-                manifestResources: Resources.default, cacheDir: path, delegate: delegate)
+            let manifestLoader = ManifestLoader(manifestResources: Resources.default, cacheDir: path, delegate: delegate)
 
             func check(loader: ManifestLoader, expectCached: Bool) {
                 delegate.clear()
                 let manifest = try! loader.load(
-                    package: manifestPath.parentDirectory,
-                    baseURL: manifestPath.pathString,
+                    at: manifestPath.parentDirectory,
+                    packageKind: .local,
+                    packageLocation: manifestPath.pathString,
                     toolsVersion: .v4_2,
-                    packageKind: .local
+                    fileSystem: fs
                 )
 
                 XCTAssertEqual(delegate.loaded, [manifestPath])
@@ -566,16 +621,20 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
                 check(loader: manifestLoader, expectCached: true)
             }
 
-            let noCacheLoader = ManifestLoader(
-                manifestResources: Resources.default, delegate: delegate)
+            let noCacheLoader = ManifestLoader(manifestResources: Resources.default, delegate: delegate)
             for _ in 0..<2 {
                 check(loader: noCacheLoader, expectCached: false)
             }
+
+            // Resetting the cache should allow us to remove the cache
+            // directory without triggering assertions in sqlite.
+            try manifestLoader.purgeCache()
+            try localFileSystem.removeFileTree(path)
         }
     }
 
     func testContentBasedCaching() throws {
-        mktmpdir { path in
+        try testWithTemporaryDirectory { path in
             let stream = BufferedOutputByteStream()
             stream <<< """
                 import PackageDescription
@@ -589,8 +648,7 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
 
             let delegate = ManifestTestDelegate()
 
-            let manifestLoader = ManifestLoader(
-                manifestResources: Resources.default, cacheDir: path, delegate: delegate)
+            let manifestLoader = ManifestLoader(manifestResources: Resources.default, cacheDir: path, delegate: delegate)
 
             func check(loader: ManifestLoader) throws {
                 let fs = InMemoryFileSystem()
@@ -598,10 +656,10 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
                 try fs.writeFileContents(manifestPath, bytes: stream.bytes)
 
                 let m = try manifestLoader.load(
-                    package: AbsolutePath.root,
-                    baseURL: "/foo",
-                    toolsVersion: .v4_2,
+                    at: AbsolutePath.root,
                     packageKind: .root,
+                    packageLocation: "/foo",
+                    toolsVersion: .v4_2,
                     fileSystem: fs)
 
                 XCTAssertEqual(m.name, "Trivial")
@@ -622,61 +680,6 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
         }
     }
 
-    func testLLBuildEngineErrors() {
-        mktmpdir { path in
-            let fs = localFileSystem
-
-            let manifestPath = path.appending(components: "pkg", "Package.swift")
-            try fs.writeFileContents(manifestPath) { stream in
-                stream <<< """
-                import PackageDescription
-                    let package = Package(
-                        name: "Trivial",
-                        targets: [
-                            .target(
-                                name: "foo",
-                                dependencies: []),
-                        ]
-                )
-                """
-            }
-
-            let delegate = ManifestTestDelegate()
-
-            let manifestLoader = ManifestLoader(
-                manifestResources: Resources.default, cacheDir: path, delegate: delegate)
-
-            func load() throws {
-                let manifest = try manifestLoader.load(
-                    package: manifestPath.parentDirectory,
-                    baseURL: manifestPath.pathString,
-                    toolsVersion: .v4_2,
-                    packageKind: .root
-                )
-
-                XCTAssertEqual(delegate.loaded, [manifestPath])
-                XCTAssertEqual(delegate.parsed, [manifestPath])
-                XCTAssertEqual(manifest.name, "Trivial")
-                XCTAssertEqual(manifest.targets[0].name, "foo")
-            }
-
-            // Check that we can load properly.
-            try load()
-
-            // Replace the db with garbage and check if we correctly diagnose.
-            let db = path.appending(component: "manifest.db")
-            try localFileSystem.removeFileTree(db)
-            try localFileSystem.writeFileContents(db) { $0 <<< "🗑" }
-            do {
-                try load()
-                XCTFail("unexpected success")
-            } catch {
-                let error = String(describing: error)
-                XCTAssertMatch(error, .contains("not a database"))
-            }
-        }
-    }
-
     func testProductTargetNotFound() throws {
         let stream = BufferedOutputByteStream()
         stream <<< """
@@ -689,12 +692,14 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
                 ],
                 targets: [
                     .target(name: "A"),
+                    .target(name: "b"),
+                    .target(name: "C"),
                 ]
             )
             """
 
         XCTAssertManifestLoadThrows(stream.bytes) { _, diagnostics in
-            diagnostics.check(diagnostic: "target 'B' referenced in product 'Product' could not be found", behavior: .error)
+            diagnostics.check(diagnostic: "target 'B' referenced in product 'Product' could not be found; valid targets are: 'A', 'C', 'b'", behavior: .error)
         }
     }
 
@@ -724,25 +729,191 @@ class PackageDescription4_2LoadingTests: PackageDescriptionLoadingTests {
 
             XCTFail("Unexpected success")
         } catch let error as StringError {
-            XCTAssertMatch(error.description, "target 'B' referenced in product 'Product' could not be found")
+            XCTAssertMatch(error.description, "target 'B' referenced in product 'Product' could not be found; valid targets are: 'A'")
+        }
+    }
+
+    // run this with TSAN/ASAN to detect concurrency issues
+    func testConcurrencyWithWarmup() throws {
+        let total = 1000
+        try testWithTemporaryDirectory { path in
+
+            let manifestPath = path.appending(components: "pkg", "Package.swift")
+            try localFileSystem.writeFileContents(manifestPath) { stream in
+                stream <<< """
+                    import PackageDescription
+                    let package = Package(
+                        name: "Trivial",
+                        targets: [
+                            .target(
+                                name: "foo",
+                                dependencies: []),
+                        ]
+                    )
+                    """
+            }
+
+            let diagnostics = DiagnosticsEngine()
+            let delegate = ManifestTestDelegate()
+            let manifestLoader = ManifestLoader(manifestResources: Resources.default, cacheDir: path, delegate: delegate)
+            let identityResolver = DefaultIdentityResolver()
+
+            // warm up caches
+            let manifest = try tsc_await { manifestLoader.load(at: manifestPath.parentDirectory,
+                                                               packageIdentity: .plain("Trivial"),
+                                                               packageKind: .local,
+                                                               packageLocation: manifestPath.pathString,
+                                                               version: nil,
+                                                               revision: nil,
+                                                               toolsVersion: .v4_2,
+                                                               identityResolver: identityResolver,
+                                                               fileSystem: localFileSystem,
+                                                               on: .global(),
+                                                               completion: $0) }
+            XCTAssertEqual(manifest.name, "Trivial")
+            XCTAssertEqual(manifest.targets[0].name, "foo")
+
+
+            let sync = DispatchGroup()
+            for _ in 0 ..< total {
+                sync.enter()
+                manifestLoader.load(at: manifestPath.parentDirectory,
+                                    packageIdentity: .plain("Trivial"),
+                                    packageKind: .local,
+                                    packageLocation: manifestPath.pathString,
+                                    version: nil,
+                                    revision: nil,
+                                    toolsVersion: .v4_2,
+                                    identityResolver: identityResolver,
+                                    fileSystem: localFileSystem,
+                                    diagnostics: diagnostics,
+                                    on: .global()) { result in
+                    defer { sync.leave() }
+
+                    switch result {
+                    case .failure(let error):
+                        XCTFail("\(error)")
+                    case .success(let manifest):
+                        XCTAssertEqual(manifest.name, "Trivial")
+                        XCTAssertEqual(manifest.targets[0].name, "foo")
+                    }
+                }
+            }
+
+            if case .timedOut = sync.wait(timeout: .now() + 30) {
+                XCTFail("timeout")
+            }
+
+            XCTAssertEqual(delegate.loaded.count, total+1)
+            XCTAssertFalse(diagnostics.hasWarnings, diagnostics.description)
+            XCTAssertFalse(diagnostics.hasErrors, diagnostics.description)
+        }
+    }
+
+    // run this with TSAN/ASAN to detect concurrency issues
+    func testConcurrencyNoWarmUp() throws {
+        let total = 1000
+        try testWithTemporaryDirectory { path in
+
+            let diagnostics = DiagnosticsEngine()
+            let delegate = ManifestTestDelegate()
+            let manifestLoader = ManifestLoader(manifestResources: Resources.default, cacheDir: path, delegate: delegate)
+            let identityResolver = DefaultIdentityResolver()
+
+            let sync = DispatchGroup()
+            for _ in 0 ..< total {
+                let random = Int.random(in: 0 ... total / 4)
+                let manifestPath = path.appending(components: "pkg-\(random)", "Package.swift")
+                if !localFileSystem.exists(manifestPath) {
+                    try localFileSystem.writeFileContents(manifestPath) { stream in
+                        stream <<< """
+                            import PackageDescription
+                            let package = Package(
+                                name: "Trivial-\(random)",
+                                targets: [
+                                    .target(
+                                        name: "foo-\(random)",
+                                        dependencies: []),
+                                ]
+                            )
+                            """
+                    }
+                }
+
+                sync.enter()
+                manifestLoader.load(at: manifestPath.parentDirectory,
+                                    packageIdentity: .plain("Trivial-\(random)"),
+                                    packageKind: .local,
+                                    packageLocation: manifestPath.pathString,
+                                    version: nil,
+                                    revision: nil,
+                                    toolsVersion: .v4_2,
+                                    identityResolver: identityResolver,
+                                    fileSystem: localFileSystem,
+                                    diagnostics: diagnostics,
+                                    on: .global()) { result in
+                    defer { sync.leave() }
+
+                    switch result {
+                    case .failure(let error):
+                        XCTFail("\(error)")
+                    case .success(let manifest):
+                        XCTAssertEqual(manifest.name, "Trivial-\(random)")
+                        XCTAssertEqual(manifest.targets[0].name, "foo-\(random)")
+                    }
+                }
+            }
+
+            if case .timedOut = sync.wait(timeout: .now() + 600) {
+                XCTFail("timeout")
+            }
+
+            XCTAssertEqual(delegate.loaded.count, total)
+            XCTAssertFalse(diagnostics.hasWarnings, diagnostics.description)
+            XCTAssertFalse(diagnostics.hasErrors, diagnostics.description)
         }
     }
 
     final class ManifestTestDelegate: ManifestLoaderDelegate {
-        var loaded: [AbsolutePath] = []
-        var parsed: [AbsolutePath] = []
+        private let lock = Lock()
+        private var _loaded: [AbsolutePath] = []
+        private var _parsed: [AbsolutePath] = []
 
         func willLoad(manifest: AbsolutePath) {
-            loaded.append(manifest)
+            self.lock.withLock {
+                self._loaded.append(manifest)
+            }
         }
 
         func willParse(manifest: AbsolutePath) {
-            parsed.append(manifest)
+            self.lock.withLock {
+                self._parsed.append(manifest)
+            }
         }
 
         func clear() {
-            loaded.removeAll()
-            parsed.removeAll()
+            self.lock.withLock {
+                self._loaded.removeAll()
+                self._parsed.removeAll()
+            }
         }
+
+        var loaded: [AbsolutePath] {
+            self.lock.withLock {
+                self._loaded
+            }
+        }
+
+        var parsed: [AbsolutePath] {
+            self.lock.withLock {
+                self._parsed
+            }
+        }
+    }
+}
+
+extension DiagnosticsEngine {
+    public var hasWarnings: Bool {
+        return diagnostics.contains(where: { $0.message.behavior == .warning })
     }
 }

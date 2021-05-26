@@ -10,7 +10,7 @@
 
 /// A platform that usually corresponds to an operating system such as
 /// iOS, macOS, or Linux.
-public struct Platform: Encodable {
+public struct Platform: Encodable, Equatable {
 
     /// The name of the platform.
     fileprivate let name: String
@@ -22,6 +22,9 @@ public struct Platform: Encodable {
     /// The macOS platform.
     public static let macOS: Platform = Platform(name: "macos")
 
+    /// The Mac Catalyst platform.
+    public static let macCatalyst: Platform = Platform(name: "maccatalyst")
+
     /// The iOS platform.
     public static let iOS: Platform = Platform(name: "ios")
 
@@ -30,6 +33,9 @@ public struct Platform: Encodable {
 
     /// The watchOS platform.
     public static let watchOS: Platform = Platform(name: "watchos")
+
+    /// The DriverKit platform
+    public static let driverKit: Platform = Platform(name: "driverkit")
 
     /// The Linux platform.
     public static let linux: Platform = Platform(name: "linux")
@@ -64,7 +70,7 @@ public struct Platform: Encodable {
 /// with the top-level package’s deployment version. The deployment
 /// target of a package's dependencies must be lower than or equal to the top-level package's
 /// deployment target version for a particular platform.
-public struct SupportedPlatform: Encodable {
+public struct SupportedPlatform: Encodable, Equatable {
 
     /// The platform.
     let platform: Platform
@@ -97,6 +103,29 @@ public struct SupportedPlatform: Encodable {
     /// - Parameter versionString: The minimum deployment target as a string representation of two or three dot-separated integers, such as `10.10.1`.
     public static func macOS(_ versionString: String) -> SupportedPlatform {
         return SupportedPlatform(platform: .macOS, version: SupportedPlatform.MacOSVersion(string: versionString).version)
+    }
+
+    /// Configures the minimum deployment target version for the Mac Catalyst platform.
+    ///
+    /// - Since: First available in PackageDescription 5.5
+    ///
+    /// - Parameter version: The minimum deployment target that the package supports.
+    @available(_PackageDescription, introduced: 5.5)
+    public static func macCatalyst(_ version: SupportedPlatform.MacCatalystVersion) -> SupportedPlatform {
+        return SupportedPlatform(platform: .macCatalyst, version: version.version)
+    }
+
+    /// Configures the minimum deployment target version for the Mac Catalyst platform
+    /// using a version string.
+    ///
+    /// The version string must be a series of two or three dot-separated integers, such as `13.0` or `13.0.1`.
+    ///
+    /// - Since: First available in PackageDescription 5.5
+    ///
+    /// - Parameter versionString: The minimum deployment target as a string representation of two or three dot-separated integers, such as `13.0.1`.
+    @available(_PackageDescription, introduced: 5.5)
+    public static func macCatalyst(_ versionString: String) -> SupportedPlatform {
+        return SupportedPlatform(platform: .macCatalyst, version: SupportedPlatform.MacCatalystVersion(string: versionString).version)
     }
 
     /// Configures the minimum deployment target version for the iOS platform.
@@ -161,6 +190,25 @@ public struct SupportedPlatform: Encodable {
     public static func watchOS(_ versionString: String) -> SupportedPlatform {
         return SupportedPlatform(platform: .watchOS, version: SupportedPlatform.WatchOSVersion(string: versionString).version)
     }
+
+    /// Configures the minimum deployment target version for the DriverKit platform.
+    ///
+    /// - Parameter version: The minimum deployment target that the package supports.
+    @available(_PackageDescription, introduced: 5.5)
+    public static func driverKit(_ version: SupportedPlatform.DriverKitVersion) -> SupportedPlatform {
+        return SupportedPlatform(platform: .driverKit, version: version.version)
+    }
+
+    /// Configures the minimum deployment target version for the DriverKit platform
+    /// using a custom version string.
+    ///
+    /// The version string must be a series of two or three dot-separated integers, such as `19.0` or `19.0.1`.
+    ///
+    /// - Parameter versionString: The minimum deployment target as a string representation of two or three dot-separated integers, such as `19.0.1`.
+    @available(_PackageDescription, introduced: 5.5)
+    public static func driverKit(_ versionString: String) -> SupportedPlatform {
+        return SupportedPlatform(platform: .driverKit, version: SupportedPlatform.DriverKitVersion(string: versionString).version)
+    }
 }
 
 /// An extension to the SupportedPlatform struct that defines major platform versions.
@@ -209,11 +257,11 @@ extension SupportedPlatform {
         @available(_PackageDescription, introduced: 5.1)
         public static let v10_15: MacOSVersion = .init(string: "10.15")
 
-        /// The value that represents macOS 10.16, which is treated
-        /// as an alias for macOS 11.0.
+        /// The value that represents macOS 10.16, which has been
+        /// replaced by the value for macOS 11.0.
         ///
         /// - Since: First available in PackageDescription 5.3
-        @available(_PackageDescription, introduced: 5.3)
+        @available(*, unavailable, renamed: "v11")
         public static let v10_16: MacOSVersion = .init(string: "11.0")
 
         /// The value that represents macOS 11.0.
@@ -266,6 +314,31 @@ extension SupportedPlatform {
         /// - Since: First available in PackageDescription 5.3
         @available(_PackageDescription, introduced: 5.3)
         public static let v14: TVOSVersion = .init(string: "14.0")
+    }
+
+    /// The supported Mac Catalyst version.
+    public struct MacCatalystVersion: Encodable, AppleOSVersion {
+        fileprivate static let name = "macCatalyst"
+        fileprivate static let minimumMajorVersion = 13
+
+        /// The underlying version representation.
+        let version: String
+
+        fileprivate init(uncheckedVersion version: String) {
+            self.version = version
+        }
+
+        /// The value that represents Mac Catalyst 13.0.
+        ///
+        /// - Since: First available in PackageDescription 5.5
+        @available(_PackageDescription, introduced: 5.5)
+        public static let v13: MacCatalystVersion = .init(string: "13.0")
+
+        /// The value that represents Mac Catalyst 14.0.
+        ///
+        /// - Since: First available in PackageDescription 5.5
+        @available(_PackageDescription, introduced: 5.5)
+        public static let v14: MacCatalystVersion = .init(string: "14.0")
     }
 
     /// The supported iOS version.
@@ -361,6 +434,27 @@ extension SupportedPlatform {
         /// - Since: First available in PackageDescription 5.3
         @available(_PackageDescription, introduced: 5.3)
         public static let v7: WatchOSVersion = .init(string: "7.0")
+    }
+
+    /// The supported DriverKit version.
+    public struct DriverKitVersion: Encodable, AppleOSVersion {
+        fileprivate static let name = "DriverKit"
+        fileprivate static let minimumMajorVersion = 19
+
+        /// The underlying version representation.
+        let version: String
+
+        fileprivate init(uncheckedVersion version: String) {
+            self.version = version
+        }
+
+        /// The value that represents DriverKit 19.0.
+        @available(_PackageDescription, introduced: 5.5)
+        public static let v19: DriverKitVersion = .init(string: "19.0")
+
+        /// The value that represents DriverKit 20.0.
+        @available(_PackageDescription, introduced: 5.5)
+        public static let v20: DriverKitVersion = .init(string: "20.0")
     }
 }
 

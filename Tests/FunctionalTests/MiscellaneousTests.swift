@@ -1,7 +1,7 @@
 /*
  This source file is part of the Swift.org open source project
 
- Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+ Copyright (c) 2014 - 2021 Apple Inc. and the Swift project authors
  Licensed under Apache License v2.0 with Runtime Library Exception
 
  See http://swift.org/LICENSE.txt for license information
@@ -31,7 +31,7 @@ class MiscellaneousTestCase: XCTestCase {
 
         fixture(name: "DependencyResolution/External/Simple") { prefix in
             let (output, _) = try executeSwiftBuild(prefix.appending(component: "Bar"))
-            XCTAssertMatch(output, .regex("Resolving .* at 1\\.2\\.3"))
+            XCTAssertMatch(output, .regex("Computed .* at 1\\.2\\.3"))
             XCTAssertMatch(output, .contains("Compiling Foo Foo.swift"))
             XCTAssertMatch(output, .contains("Merging module Foo"))
             XCTAssertMatch(output, .contains("Compiling Bar main.swift"))
@@ -107,7 +107,7 @@ class MiscellaneousTestCase: XCTestCase {
         }
     }
 
-    func DISABLED_testPackageManagerDefineAndXArgs() {
+    func testPackageManagerDefineAndXArgs() {
         fixture(name: "Miscellaneous/-DSWIFT_PACKAGE") { prefix in
             XCTAssertBuildFails(prefix)
             XCTAssertBuilds(prefix, Xcc: ["-DEXTRA_C_DEFINE=2"], Xswiftc: ["-DEXTRA_SWIFTC_DEFINE"])
@@ -213,14 +213,19 @@ class MiscellaneousTestCase: XCTestCase {
     }
 
     func testSwiftTestParallel() throws {
-        // Running swift-test fixtures on linux is not yet possible.
-      #if os(macOS)
+        // <rdar://problem/69448176> Fix and re-enable test related to "ParallelTestsPkg"
+        try XCTSkipIf(true)
+
         fixture(name: "Miscellaneous/ParallelTestsPkg") { prefix in
           // First try normal serial testing.
           do {
             _ = try SwiftPMProduct.SwiftTest.execute([], packagePath: prefix)
-          } catch SwiftPMProductError.executionFailure(_, _, let stderr) {
-            XCTAssertTrue(stderr.contains("Executed 2 tests"))
+          } catch SwiftPMProductError.executionFailure(_, let output, let stderr) {
+            #if os(macOS)
+              XCTAssertTrue(stderr.contains("Executed 2 tests"))
+            #else
+              XCTAssertTrue(output.contains("Executed 2 tests"))
+            #endif
           }
 
           do {
@@ -253,31 +258,59 @@ class MiscellaneousTestCase: XCTestCase {
           let contents = try localFileSystem.readFileContents(xUnitOutput).description
           XCTAssertTrue(contents.contains("tests=\"3\" failures=\"1\""))
         }
-      #endif
     }
 
     func testSwiftTestFilter() throws {
-        #if os(macOS)
-            fixture(name: "Miscellaneous/ParallelTestsPkg") { prefix in
-                let (stdout, _) = try SwiftPMProduct.SwiftTest.execute(["--filter", ".*1", "-l"], packagePath: prefix)
-                XCTAssertMatch(stdout, .contains("testExample1"))
-                XCTAssertNoMatch(stdout, .contains("testExample2"))
-                XCTAssertNoMatch(stdout, .contains("testSureFailure"))
-            }
+        // <rdar://problem/69448176> Fix and re-enable test related to "ParallelTestsPkg"
+        try XCTSkipIf(true)
 
-            fixture(name: "Miscellaneous/ParallelTestsPkg") { prefix in
-                let (stdout, _) = try SwiftPMProduct.SwiftTest.execute(["--filter", ".*1", "--filter", "testSureFailure", "-l"], packagePath: prefix)
-                XCTAssertMatch(stdout, .contains("testExample1"))
-                XCTAssertNoMatch(stdout, .contains("testExample2"))
-                XCTAssertMatch(stdout, .contains("testSureFailure"))
-            }
-        #endif
+        fixture(name: "Miscellaneous/ParallelTestsPkg") { prefix in
+            let (stdout, _) = try SwiftPMProduct.SwiftTest.execute(["--filter", ".*1", "-l"], packagePath: prefix)
+            XCTAssertMatch(stdout, .contains("testExample1"))
+            XCTAssertNoMatch(stdout, .contains("testExample2"))
+            XCTAssertNoMatch(stdout, .contains("testSureFailure"))
+        }
+
+        fixture(name: "Miscellaneous/ParallelTestsPkg") { prefix in
+            let (stdout, _) = try SwiftPMProduct.SwiftTest.execute(["--filter", "ParallelTestsTests", "--skip", ".*1", "--filter", "testSureFailure", "-l"], packagePath: prefix)
+            XCTAssertNoMatch(stdout, .contains("testExample1"))
+            XCTAssertMatch(stdout, .contains("testExample2"))
+            XCTAssertMatch(stdout, .contains("testSureFailure"))
+        }
     }
 
-    func testOverridingSwiftcArguments() throws {
+    func testSwiftTestSkip() throws {
+        // <rdar://problem/69448176> Fix and re-enable test related to "ParallelTestsPkg"
+        try XCTSkipIf(true)
+        
+        fixture(name: "Miscellaneous/ParallelTestsPkg") { prefix in
+            let (stdout, _) = try SwiftPMProduct.SwiftTest.execute(["--skip", "ParallelTestsTests", "-l"], packagePath: prefix)
+            XCTAssertNoMatch(stdout, .contains("testExample1"))
+            XCTAssertNoMatch(stdout, .contains("testExample2"))
+            XCTAssertMatch(stdout, .contains("testSureFailure"))
+        }
+
+        fixture(name: "Miscellaneous/ParallelTestsPkg") { prefix in
+            let (stdout, _) = try SwiftPMProduct.SwiftTest.execute(["--filter", "ParallelTestsTests", "--skip", ".*2", "--filter", "TestsFailure", "--skip", "testSureFailure", "-l"], packagePath: prefix)
+            XCTAssertMatch(stdout, .contains("testExample1"))
+            XCTAssertNoMatch(stdout, .contains("testExample2"))
+            XCTAssertNoMatch(stdout, .contains("testSureFailure"))
+        }
+
+        fixture(name: "Miscellaneous/ParallelTestsPkg") { prefix in
+            let (stdout, stderr) = try SwiftPMProduct.SwiftTest.execute(["--skip", "Tests"], packagePath: prefix)
+            XCTAssertNoMatch(stdout, .contains("testExample1"))
+            XCTAssertNoMatch(stdout, .contains("testExample2"))
+            XCTAssertNoMatch(stdout, .contains("testSureFailure"))
+            XCTAssertMatch(stderr, .contains("No matching test cases were run"))
+        }
+    }
+
+    func testOverridingDeploymentTargetUsingSwiftCompilerArgument() throws {
       #if os(macOS)
-        fixture(name: "Miscellaneous/OverrideSwiftcArgs") { prefix in
-            try executeSwiftBuild(prefix, Xswiftc: ["-target", "x86_64-apple-macosx10.20"])
+        fixture(name: "Miscellaneous/DistantFutureDeploymentTarget") { prefix in
+            let hostTriple = Resources.default.toolchain.triple
+            try executeSwiftBuild(prefix, Xswiftc: ["-target", "\(hostTriple.arch)-apple-macosx41.0"])
         }
       #endif
     }
@@ -389,65 +422,23 @@ class MiscellaneousTestCase: XCTestCase {
             XCTAssert(output.contains("does not exist"), "Error from git was not propogated to process output: \(output)")
         }
     }
+    
+    func testLocalPackageUsedAsURL() throws {
+        fixture(name: "Miscellaneous/LocalPackageAsURL", createGitRepo: false) { prefix in
+            // This fixture has a setup that is trying to use a local package
+            // as a url that hasn't been initialized as a repo
 
-    func testSwiftTestLinuxMainGeneration() throws {
-      #if os(macOS)
-        fixture(name: "Miscellaneous/ParallelTestsPkg") { prefix in
-            let fs = localFileSystem
-            try SwiftPMProduct.SwiftTest.execute(["--generate-linuxmain"], packagePath: prefix)
+            // Launch swift-build.
+            let app = prefix.appending(component: "Bar")
 
-            // Check linux main.
-            let linuxMain = prefix.appending(components: "Tests", "LinuxMain.swift")
-            XCTAssertEqual(try fs.readFileContents(linuxMain), """
-                import XCTest
+            let result = try SwiftPMProduct.SwiftBuild.executeProcess([], packagePath: app)
 
-                import ParallelTestsPkgTests
-
-                var tests = [XCTestCaseEntry]()
-                tests += ParallelTestsPkgTests.__allTests()
-
-                XCTMain(tests)
-
-                """)
-
-            // Check test manifest.
-            let testManifest = prefix.appending(components: "Tests", "ParallelTestsPkgTests", "XCTestManifests.swift")
-            XCTAssertEqual(try fs.readFileContents(testManifest), """
-                #if !canImport(ObjectiveC)
-                import XCTest
-
-                extension ParallelTestsFailureTests {
-                    // DO NOT MODIFY: This is autogenerated, use:
-                    //   `swift test --generate-linuxmain`
-                    // to regenerate.
-                    static let __allTests__ParallelTestsFailureTests = [
-                        ("testSureFailure", testSureFailure),
-                    ]
-                }
-
-                extension ParallelTestsTests {
-                    // DO NOT MODIFY: This is autogenerated, use:
-                    //   `swift test --generate-linuxmain`
-                    // to regenerate.
-                    static let __allTests__ParallelTestsTests = [
-                        ("testExample1", testExample1),
-                        ("testExample2", testExample2),
-                    ]
-                }
-
-                public func __allTests() -> [XCTestCaseEntry] {
-                    return [
-                        testCase(ParallelTestsFailureTests.__allTests__ParallelTestsFailureTests),
-                        testCase(ParallelTestsTests.__allTests__ParallelTestsTests),
-                    ]
-                }
-                #endif
-
-                """)
+            XCTAssert(result.exitStatus != .terminated(code: 0))
+            let output = try result.utf8stderrOutput()
+            XCTAssert(output.contains("Cannot clone from local directory"), "Didn't find expected output: \(output)")
         }
-      #endif
     }
-
+    
     func testUnicode() {
         #if !os(Linux) && !os(Android) // TODO: - Linux has trouble with this and needs investigation.
         fixture(name: "Miscellaneous/Unicode") { prefix in
@@ -493,7 +484,7 @@ class MiscellaneousTestCase: XCTestCase {
             return
         }
 
-        mktmpdir { path in
+        try testWithTemporaryDirectory { path in
             let fs = localFileSystem
 
             let package = path.appending(component: "foo")
@@ -524,5 +515,166 @@ class MiscellaneousTestCase: XCTestCase {
             XCTAssertMatch(diff, .contains("Func Foo.foo() has been renamed to Func foo(param:)"))
             XCTAssertMatch(diff, .contains("Func Foo.foo() has return type change from Swift.String to Swift.Int"))
         }
+    }
+
+    func testEnableTestDiscoveryDeprecation() throws {
+        let compilerDiagnosticFlags = ["-Xswiftc", "-Xfrontend", "-Xswiftc", "-Rmodule-interface-rebuild"]
+        #if canImport(Darwin)
+        // should emit when LinuxMain is present
+        fixture(name: "Miscellaneous/TestDiscovery/Simple") { path in
+            let (_, stderr) = try SwiftPMProduct.SwiftTest.execute(["--enable-test-discovery"] + compilerDiagnosticFlags, packagePath: path)
+            XCTAssertMatch(stderr, .contains("warning: '--enable-test-discovery' option is deprecated"))
+        }
+
+        // should emit when LinuxMain is not present
+        fixture(name: "Miscellaneous/TestDiscovery/Simple") { path in
+            try localFileSystem.writeFileContents(path.appending(components: "Tests", SwiftTarget.testManifestNames.first!), bytes: "fatalError(\"boom\")")
+            let (_, stderr) = try SwiftPMProduct.SwiftTest.execute(["--enable-test-discovery"] + compilerDiagnosticFlags, packagePath: path)
+            XCTAssertMatch(stderr, .contains("warning: '--enable-test-discovery' option is deprecated"))
+        }
+        #else
+        // should emit when LinuxMain is present
+        fixture(name: "Miscellaneous/TestDiscovery/Simple") { path in
+            let (_, stderr) = try SwiftPMProduct.SwiftTest.execute(["--enable-test-discovery"] + compilerDiagnosticFlags, packagePath: path)
+            XCTAssertMatch(stderr, .contains("warning: '--enable-test-discovery' option is deprecated"))
+        }
+        // should not emit when LinuxMain is present
+        fixture(name: "Miscellaneous/TestDiscovery/Simple") { path in
+            try localFileSystem.writeFileContents(path.appending(components: "Tests", SwiftTarget.testManifestNames.first!), bytes: "fatalError(\"boom\")")
+            let (_, stderr) = try SwiftPMProduct.SwiftTest.execute(["--enable-test-discovery"] + compilerDiagnosticFlags, packagePath: path)
+            XCTAssertNoMatch(stderr, .contains("warning: '--enable-test-discovery' option is deprecated"))
+        }
+        #endif
+    }
+
+    func testGenerateLinuxMainDeprecation() {
+        fixture(name: "Miscellaneous/TestDiscovery/Simple") { path in
+            let (_, stderr) = try SwiftPMProduct.SwiftTest.execute(["--generate-linuxmain"], packagePath: path)
+            // test deprecation warning
+            XCTAssertMatch(stderr, .contains("warning: '--generate-linuxmain' option is deprecated"))
+        }
+    }
+    
+    func testGenerateLinuxMain() {
+        #if os(macOS)
+        fixture(name: "Miscellaneous/TestDiscovery/Simple") { path in
+            _ = try SwiftPMProduct.SwiftTest.execute(["--generate-linuxmain"], packagePath: path)
+
+            // Check LinuxMain
+            let linuxMain = path.appending(components: "Tests", "LinuxMain.swift")
+             XCTAssertEqual(try localFileSystem.readFileContents(linuxMain), """
+                 import XCTest
+
+                 import SimpleTests
+
+                 var tests = [XCTestCaseEntry]()
+                 tests += SimpleTests.__allTests()
+
+                 XCTMain(tests)
+
+                 """)
+
+            // Check test manifest
+            let testManifest = path.appending(components: "Tests", "SimpleTests", "XCTestManifests.swift")
+            XCTAssertEqual(try localFileSystem.readFileContents(testManifest), """
+                #if !canImport(ObjectiveC)
+                import XCTest
+
+                extension SimpleTests {
+                    // DO NOT MODIFY: This is autogenerated, use:
+                    //   `swift test --generate-linuxmain`
+                    // to regenerate.
+                    static let __allTests__SimpleTests = [
+                        ("test_Example2", test_Example2),
+                        ("testExample1", testExample1),
+                    ]
+                }
+
+                public func __allTests() -> [XCTestCaseEntry] {
+                    return [
+                        testCase(SimpleTests.__allTests__SimpleTests),
+                    ]
+                }
+                #endif
+
+                """)
+        }
+        #endif
+    }
+    
+    func testTestsCanLinkAgainstExecutable() throws {
+        // Check if the host compiler supports the '-entry-point-function-name' flag.
+        try XCTSkipUnless(Resources.default.swiftCompilerSupportsRenamingMainSymbol, "skipping because host compiler doesn't support '-entry-point-function-name'")
+        
+        fixture(name: "Miscellaneous/TestableExe") { prefix in
+            do {
+                let (stdout, _) = try executeSwiftTest(prefix)
+                XCTAssertMatch(stdout, .contains("Linking TestableExe1"))
+                XCTAssertMatch(stdout, .contains("Linking TestableExe2"))
+                XCTAssertMatch(stdout, .contains("Linking TestableExePackageTests"))
+                XCTAssertMatch(stdout, .contains("Hello, world"))
+                XCTAssertMatch(stdout, .contains("Hello, planet"))
+            } catch {
+                XCTFail("\(error)")
+            }
+        }
+    }
+
+    func testExecutableTargetMismatch() {
+        fixture(name: "Miscellaneous/TargetMismatch") { path in
+            do {
+                let output = try executeSwiftBuild(path)
+                XCTAssertMatch(output.stdout, .contains("Compiling Sample main.swift"))
+                XCTAssertMatch(output.stderr, .contains("The target named 'Sample' was identified as an executable target but a non-executable product with this name already exists."))
+            } catch {
+                XCTFail("\(error)")
+            }
+        }
+    }
+
+    func testEditModeEndToEnd() {
+        fixture(name: "Miscellaneous/Edit") { prefix in
+            let prefix = resolveSymlinks(prefix)
+            let appPath = prefix.appending(component: "App")
+
+            // prepare the dependencies as git repos
+            try ["Foo", "Bar"].forEach { directory in
+                let path = prefix.appending(component: directory)
+                _ = try Process.checkNonZeroExit(args: "git", "-C", path.pathString, "init")
+            }
+
+            do {
+                // make sure it builds
+                let output = try executeSwiftBuild(appPath)
+                XCTAssertTrue(output.stdout.contains("Fetching \(prefix)/Foo"), output.stdout)
+                XCTAssertTrue(output.stdout.contains("Creating working copy for \(prefix)/Foo"), output.stdout)
+                XCTAssertTrue(output.stdout.contains("Build complete!"), output.stdout)
+            }
+
+            // put foo into edit mode
+            _ = try executeSwiftPackage(appPath, extraArgs: ["edit", "Foo"])
+            XCTAssertTrue(localFileSystem.exists(appPath.appending(components: ["Packages", "Foo"])))
+
+            do {
+                // build again in edit mode
+                let output = try executeSwiftBuild(appPath)
+                XCTAssertTrue(output.stdout.contains("Build complete!"))
+            }
+
+
+            do {
+                // take foo out of edit mode
+                let output = try executeSwiftPackage(appPath, extraArgs: ["unedit", "Foo"])
+                XCTAssertTrue(output.stdout.contains("Creating working copy for \(prefix)/Foo"), output.stdout)
+                XCTAssertFalse(localFileSystem.exists(appPath.appending(components: ["Packages", "Foo"])))
+            }
+
+            // build again in edit mode
+            do {
+                let output = try executeSwiftBuild(appPath)
+                XCTAssertTrue(output.stdout.contains("Build complete!"), output.stdout)
+            }
+        }
+
     }
 }

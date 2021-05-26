@@ -1,24 +1,23 @@
 /*
  This source file is part of the Swift.org open source project
 
- Copyright (c) 2014 - 2017 Apple Inc. and the Swift project authors
+ Copyright (c) 2014 - 2020 Apple Inc. and the Swift project authors
  Licensed under Apache License v2.0 with Runtime Library Exception
 
  See http://swift.org/LICENSE.txt for license information
  See http://swift.org/CONTRIBUTORS.txt for Swift project authors
-*/
+ */
 
-import func XCTest.XCTFail
 import class Foundation.NSDate
 import class Foundation.Thread
+import func XCTest.XCTFail
 
-import TSCBasic
 import PackageGraph
 import PackageModel
 import SourceControl
+import TSCBasic
 import TSCUtility
 import Workspace
-import Commands
 
 @_exported import TSCTestSupport
 
@@ -34,6 +33,7 @@ import class Foundation.Bundle
 /// the name were a relative path.
 public func fixture(
     name: String,
+    createGitRepo: Bool = true,
     file: StaticString = #file,
     line: UInt = #line,
     body: (AbsolutePath) throws -> Void
@@ -72,12 +72,14 @@ public func fixture(
                 try body(dstDir)
             } else {
                 // Copy each of the package directories and construct a git repo in it.
-                for fileName in try! localFileSystem.getDirectoryContents(fixtureDir).sorted() {
+                for fileName in try localFileSystem.getDirectoryContents(fixtureDir).sorted() {
                     let srcDir = fixtureDir.appending(component: fileName)
                     guard localFileSystem.isDirectory(srcDir) else { continue }
                     let dstDir = tmpDirPath.appending(component: fileName)
                     try systemQuietly("cp", "-R", "-H", srcDir.pathString, dstDir.pathString)
-                    initGitRepo(dstDir, tag: "1.2.3", addFile: false)
+                    if createGitRepo {
+                        initGitRepo(dstDir, tag: "1.2.3", addFile: false)
+                    }
                 }
 
                 // Invoke the block, passing it the path of the copied fixture.
@@ -104,7 +106,7 @@ public func initGitRepo(
     file: StaticString = #file,
     line: UInt = #line
 ) {
-    initGitRepo(dir, tags: tag.flatMap({ [$0] }) ?? [], addFile: addFile, file: file, line: line)
+    initGitRepo(dir, tags: tag.flatMap { [$0] } ?? [], addFile: addFile, file: file, line: line)
 }
 
 public func initGitRepo(
@@ -119,7 +121,7 @@ public func initGitRepo(
             let file = dir.appending(component: "file.swift")
             try systemQuietly(["touch", file.pathString])
         }
-        
+
         try systemQuietly([Git.tool, "-C", dir.pathString, "init"])
         try systemQuietly([Git.tool, "-C", dir.pathString, "config", "user.email", "example@example.com"])
         try systemQuietly([Git.tool, "-C", dir.pathString, "config", "user.name", "Example Example"])
@@ -130,12 +132,11 @@ public func initGitRepo(
         for tag in tags {
             try repo.tag(name: tag)
         }
+        try systemQuietly([Git.tool, "-C", dir.pathString, "branch", "-m", "main"])
     } catch {
         XCTFail("\(error)", file: file, line: line)
     }
 }
-
-private var globalSymbolInMainBinary = 0
 
 @discardableResult
 public func executeSwiftBuild(
@@ -167,6 +168,34 @@ public func executeSwiftRun(
     return try SwiftPMProduct.SwiftRun.execute(args, packagePath: packagePath, env: env)
 }
 
+@discardableResult
+public func executeSwiftPackage(
+    _ packagePath: AbsolutePath,
+    configuration: Configuration = .Debug,
+    extraArgs: [String] = [],
+    Xcc: [String] = [],
+    Xld: [String] = [],
+    Xswiftc: [String] = [],
+    env: [String: String]? = nil
+) throws -> (stdout: String, stderr: String) {
+    let args = swiftArgs(configuration: configuration, extraArgs: extraArgs, Xcc: Xcc, Xld: Xld, Xswiftc: Xswiftc)
+    return try SwiftPMProduct.SwiftPackage.execute(args, packagePath: packagePath, env: env)
+}
+
+@discardableResult
+public func executeSwiftTest(
+    _ packagePath: AbsolutePath,
+    configuration: Configuration = .Debug,
+    extraArgs: [String] = [],
+    Xcc: [String] = [],
+    Xld: [String] = [],
+    Xswiftc: [String] = [],
+    env: [String: String]? = nil
+) throws -> (stdout: String, stderr: String) {
+    let args = swiftArgs(configuration: configuration, extraArgs: extraArgs, Xcc: Xcc, Xld: Xld, Xswiftc: Xswiftc)
+    return try SwiftPMProduct.SwiftTest.execute(args, packagePath: packagePath, env: env)
+}
+
 private func swiftArgs(
     configuration: Configuration,
     extraArgs: [String],
@@ -183,36 +212,40 @@ private func swiftArgs(
     }
 
     args += extraArgs
-    args += Xcc.flatMap({ ["-Xcc", $0] })
-    args += Xld.flatMap({ ["-Xlinker", $0] })
-    args += Xswiftc.flatMap({ ["-Xswiftc", $0] })
+    args += Xcc.flatMap { ["-Xcc", $0] }
+    args += Xld.flatMap { ["-Xlinker", $0] }
+    args += Xswiftc.flatMap { ["-Xswiftc", $0] }
     return args
 }
 
 public func loadPackageGraph(
+    identityResolver: IdentityResolver = DefaultIdentityResolver(),
     fs: FileSystem,
     diagnostics: DiagnosticsEngine = DiagnosticsEngine(),
     manifests: [Manifest],
+    binaryArtifacts: [BinaryArtifact] = [],
     explicitProduct: String? = nil,
     shouldCreateMultipleTestProducts: Bool = false,
-    createREPLProduct: Bool = false
-) -> PackageGraph {
-    let rootManifests = manifests.filter({ $0.packageKind == .root })
-    let externalManifests = manifests.filter({ $0.packageKind != .root })
-    let packages = rootManifests.map({ $0.path })
+    allowPluginTargets: Bool = false,
+    createREPLProduct: Bool = false,
+    useXCBuildFileRules: Bool = false
+) throws -> PackageGraph {
+    let rootManifests = manifests.filter { $0.packageKind == .root }.spm_createDictionary{ ($0.path, $0) }
+    let externalManifests = manifests.filter { $0.packageKind != .root }
+    let packages = Array(rootManifests.keys)
     let input = PackageGraphRootInput(packages: packages)
     let graphRoot = PackageGraphRoot(input: input, manifests: rootManifests, explicitProduct: explicitProduct)
 
-    return PackageGraphLoader().load(
+    return try PackageGraph.load(
         root: graphRoot,
+        identityResolver: identityResolver,
+        additionalFileRules: useXCBuildFileRules ? FileRuleDescription.xcbuildFileTypes : [],
         externalManifests: externalManifests,
+        binaryArtifacts: binaryArtifacts,
         diagnostics: diagnostics,
         fileSystem: fs,
         shouldCreateMultipleTestProducts: shouldCreateMultipleTestProducts,
+        allowPluginTargets: allowPluginTargets,
         createREPLProduct: createREPLProduct
     )
-}
-
-extension Destination {
-    public static let host = try! hostDestination()
 }
